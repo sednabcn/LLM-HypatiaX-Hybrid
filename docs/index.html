@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>HypatiaX control room</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=Public+Sans:wght@400;600&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#f2f4ef;--ink:#17252b;--mut:#5b6b70;--line:#cfd7d2;--card:#fbfcfa;--real:#0b6b5f;--dry:#a4300f;--none:#6b6f3a;--open:#a4300f;--mit:#8a6a00;--fix:#0b6b5f}
+@media(prefers-color-scheme:dark){:root{--bg:#10191c;--ink:#e3ece8;--mut:#93a5a8;--line:#2a3a3f;--card:#16232744;--real:#4cc2ae;--dry:#ff8a65;--none:#c4c870;--open:#ff8a65;--mit:#e5bf4a;--fix:#4cc2ae}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 "Public Sans",system-ui,sans-serif}
+main{max-width:1000px;margin:0 auto;padding:0 20px 60px}
+h1,h2{font-family:Fraunces,Georgia,serif;font-weight:700;margin:0}
+#banner{padding:22px 20px;border-bottom:3px solid var(--c);color:var(--c);background:repeating-linear-gradient(135deg,transparent 0 14px,color-mix(in srgb,var(--c) 10%,transparent) 14px 28px)}
+#banner .in{max-width:1000px;margin:0 auto;display:flex;flex-wrap:wrap;gap:6px 24px;align-items:baseline}
+#banner h1{font-size:clamp(1.6rem,5vw,2.6rem);color:var(--c)}#banner p{margin:0;color:var(--ink)}
+section{margin-top:34px}h2{font-size:1.35rem;margin-bottom:10px}
+.next{border-left:4px solid var(--ink);padding:4px 0 4px 16px;font-size:1.1rem}
+.meta{color:var(--mut);font-size:.9rem}
+table{border-collapse:collapse;width:100%;font-size:.92rem}th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-weight:600;color:var(--mut)}td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}
+.wrap{overflow-x:auto}
+.bar{height:10px;background:var(--line);border-radius:5px;overflow:hidden;display:flex;max-width:420px}.bar i{display:block;height:100%}
+.pill{display:inline-block;padding:1px 9px;border-radius:10px;font-size:.8rem;border:1px solid currentColor}
+.fixed{color:var(--fix)}.open{color:var(--open)}.mitigated{color:var(--mit)}
+.tabs button{font:inherit;background:none;border:1px solid var(--line);padding:3px 12px;border-radius:14px;color:var(--ink);cursor:pointer;margin:0 6px 8px 0}
+.tabs button[aria-pressed=true]{background:var(--ink);color:var(--bg)}
+button:focus-visible{outline:2px solid var(--real);outline-offset:2px}
+pre{background:var(--card);border:1px solid var(--line);padding:10px;overflow-x:auto;font-size:.82rem;white-space:pre-wrap}
+</style></head><body>
+<div id="banner" style="--c:var(--none)"><div class="in"><h1 id="st">Loading…</h1><p id="stsub"></p></div></div>
+<main>
+<section><h2>Next action</h2><div class="next" id="next"></div><p class="meta" id="blk"></p></section>
+<section><h2>Audit register</h2><div class="bar" id="abar"></div><p class="meta" id="asum"></p>
+<div class="tabs" id="tabs"></div><div class="wrap"><table id="audit"></table></div></section>
+<section><h2>Runs in the database</h2><div class="wrap"><table id="runs"></table></div><p class="meta" id="rsum"></p></section>
+<section><h2>References</h2><div class="bar" id="rbar"></div><p class="meta" id="rtxt"></p></section>
+<section><h2>Release gate</h2><pre id="gate"></pre></section>
+<p class="meta" id="foot"></p>
+</main>
+<script>
+const $=id=>document.getElementById(id), esc=s=>String(s??"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+fetch("state.json",{cache:"no-store"}).then(r=>r.json()).then(s=>{
+  const st=s.data_status, col={REAL:"--real",DRYRUN:"--dry",NONE:"--none"}[st];
+  $("banner").style.setProperty("--c",`var(${col})`);
+  $("st").textContent={REAL:"Real results",DRYRUN:"Synthetic dry-run: not findings",NONE:"No results ingested yet"}[st];
+  $("stsub").textContent={REAL:"Numbers come from ingested experiment runs.",DRYRUN:"Plumbing check only. Nothing here may enter the paper.",NONE:"Run experiments, then ingest."}[st];
+  const p=s.project||{};
+  $("next").textContent=p.next_action||"PROJECT_STATE.md not found";
+  $("blk").textContent=(p.step?p.step+". ":"")+(p.blockers?.length?"Blockers: "+p.blockers.join(", "):"");
+  const a=s.audit, pc=k=>(100*a[k]/a.total)+"%";
+  $("abar").innerHTML=`<i style="width:${pc("fixed")};background:var(--fix)"></i><i style="width:${pc("mitigated")};background:var(--mit)"></i><i style="width:${pc("open")};background:var(--open)"></i>`;
+  $("asum").textContent=`${a.fixed} fixed, ${a.mitigated} mitigated, ${a.open} open of ${a.total} (fix rate ${Math.round(a.fix_rate*100)}%)`;
+  let f="all";const draw=()=>{$("audit").innerHTML="<tr><th>ID<th>Kind<th>Status<th>Issue</tr>"+a.items.filter(i=>f=="all"||i.status==f).map(i=>`<tr><td>${esc(i.id)}<td>${esc(i.kind)}<td><span class="pill ${i.status}">${i.status}</span><td>${esc(i.title)}</tr>`).join("");
+    $("tabs").innerHTML=["all","open","mitigated","fixed"].map(k=>`<button aria-pressed="${k==f}" data-k="${k}">${k}</button>`).join("");
+    $("tabs").querySelectorAll("button").forEach(b=>b.onclick=()=>{f=b.dataset.k;draw()})};draw();
+  const r=s.runs;
+  $("runs").innerHTML="<tr><th>Experiment<th class=n>Runs<th class=n>Seeds<th class=n>Variants<th class=n>Cases<th class=n>Synthetic</tr>"+(r.by_exp.map(e=>`<tr><td>${esc(e.exp_id)}<td class=n>${e.runs}<td class=n>${e.seeds}<td class=n>${e.variants}<td class=n>${e.cases}<td class=n>${e.synthetic}</tr>`).join("")||"<tr><td colspan=6>No runs.</tr>");
+  $("rsum").textContent=r.db?`${r.total} runs, ${r.sweep_rows} sweep rows (${r.db})`:"";
+  const f2=s.refs;$("rbar").innerHTML=`<i style="width:${100*f2.verified/f2.target}%;background:var(--real)"></i>`;
+  $("rtxt").textContent=`${f2.verified} verified of ${f2.total} entries; target ${f2.target}+ verified.`;
+  $("gate").textContent=(s.release_gate.ok?"PASS":"BLOCKED")+"\n"+(s.release_gate.output||"");
+  $("foot").textContent=`commit ${s.git_sha||"?"}, generated ${s.generated_at}`;
+}).catch(e=>{$("st").textContent="state.json not found";$("stsub").textContent="Run scripts/export_state.py or wait for the Pages workflow."});
+</script></body></html>

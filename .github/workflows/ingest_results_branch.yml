@@ -1,0 +1,22 @@
+name: ingest-results
+# You push real result JSONs to a branch named results/<run-id> (layout: results/hybrid_comparison/<exp>/*.json).
+# This validates them with the real guards (synthetic rows and engine<5.0 are refused) and reports in the job summary.
+# It does NOT merge anything: review the summary, then open a PR for the branch.
+on:
+  push: {branches: ["results/**"]}
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - run: pip install numpy scipy pandas matplotlib pyyaml scikit-learn pytest
+      - name: Ingest + audit
+        run: |
+          set -o pipefail
+          { echo '### ingest'; python scripts/ingest_results.py results --reset; } 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+          { echo '### audit'; python rsc/experiments/analytics/audit_checks.py; } 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          python scripts/export_state.py --out /tmp/state.json | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with: {name: state-and-db, path: "/tmp/state.json\nrsc/db/results.sqlite"}
