@@ -1,0 +1,22 @@
+name: paper-pipeline
+on: {push: {branches: [main]}, pull_request: {}}
+jobs:
+  plumbing:                       # synthetic dry-run: proves ingest/stats/tables/figures/LaTeX work. Never produces results.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - run: pip install numpy scipy pandas matplotlib pyyaml scikit-learn pytest
+      - run: sudo apt-get update && sudo apt-get install -y texlive-latex-extra texlive-science latexmk
+      - run: make test
+      - run: make dryrun
+      - uses: actions/upload-artifact@v4
+        with: {name: dryrun-paper, path: paper/main.pdf}
+  references:                     # needs internet; blocks release, not PRs
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python scripts/validate_refs.py paper/references.bib --strict
+  # Real experiments run through ci_runner_hybrid.yml (API key + Julia); then: make real RESULTS=<dir> && python .github/scripts/assert_real_build.py

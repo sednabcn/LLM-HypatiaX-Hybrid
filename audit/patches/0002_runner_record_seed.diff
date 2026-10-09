@@ -1,0 +1,18 @@
+--- /tmp/runner.orig	2026-10-07 06:53:19.509913654 +0000
++++ rsc/experiments/benchmarks/run_comparative_hybrid_methods.py	2026-10-07 06:53:19.522427705 +0000
+@@ -396,6 +396,7 @@
+                   f"protocol={metadata.get('protocol_source')}\n{'-' * 80}")
+         row = {"description": description, "domain": domain,
+                "family": metadata.get("family"), "protocol_source": metadata.get("protocol_source"),
++               "seed": metadata.get("seed"),   # PATCH 0002: seed was never written (audit A-002)
+                "timestamp": datetime.now().isoformat(), "results": {}}
+         for m in self.methods:
+             try:
+@@ -489,6 +490,7 @@
+     out_path = out_dir / f"hybrid_comparison_results_{args.protocol}{pca_tag}{shard_tag}.json"
+     with open(out_path, "w") as f:
+         json.dump({"protocol": args.protocol, "pca": args.pca, "methods": requested,
++                   "seeds": list(seeds), "git_sha": _os.environ.get("GIT_SHA"),   # PATCH 0002
+                    "timestamp": datetime.now().isoformat(), "n_cases": len(all_rows),
+                    "rows": all_rows}, f, indent=2, default=str)
+     print(f"\nWrote {len(all_rows)} case result(s) to {out_path}")

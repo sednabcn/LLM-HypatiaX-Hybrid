@@ -1,0 +1,1 @@
+paper: {main: paper/main.tex, class: jmlr, bib: paper/references.bib}

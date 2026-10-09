@@ -1,0 +1,25 @@
+# Issue register. status: fixed | open | mitigated.  kind: design|code|data|reproducibility|validity|docs
+# `affects`: experiment ids (hybrid_*) or "all".  Patches live in audit/patches/.
+issues:
+- {id: A-001, kind: design, status: fixed, title: "Variant ID tables disagree (PDF: 5 variants; package: 7 + '6-pca'; sh: methods 1-9)", patch: config/variants.yml, affects: [all]}
+- {id: A-002, kind: code, status: fixed, title: "Runner JSON rows carry no seed; multi-seed runs indistinguishable", patch: audit/patches/0002_runner_record_seed.diff, affects: [all]}
+- {id: A-003, kind: reproducibility, status: fixed, title: "Copied scripts assume hypatiax/ layout; moved under rsc/", patch: scripts/env.sh, affects: [all]}
+- {id: A-004, kind: design, status: fixed, title: "experiments.yml method lists unconfirmed ('V7?'); now mirrors run_hybrid_all.sh", patch: config/experiments.yml, affects: [all]}
+- {id: A-005, kind: design, status: mitigated, title: "nguyen12 steps run method 9 only: no baseline, so win rate (G1) undefined there", affects: [hybrid_exp3, hybrid_exp3b]}
+- {id: A-006, kind: validity, status: open, title: "V5 physics fallback is OFF by default (enable_physics_fallback=False): V5 may reduce to retry-only V4", affects: [hybrid_exp1, hybrid_exp2]}
+- {id: A-007, kind: validity, status: open, title: "V3 weighting differs by source: report R2/sigma vs package code 1/sigma (R2 unused); confirm real repo", affects: [hybrid_exp1, hybrid_exp2]}
+- {id: A-008, kind: validity, status: open, title: "V3 bare except silently degrades to argmax; decision label must expose fallback mode", affects: [hybrid_exp1, hybrid_exp2]}
+- {id: A-009, kind: design, status: mitigated, patch: audit/patches/0003_pure_pysr_baseline.diff, title: "Pure-PySR baseline (V4 llm_mode=none) is not a registry entry; add as method 10 or derive", affects: [all]}
+- {id: A-010, kind: data, status: mitigated, patch: scripts/ingest_sweeps.py, title: "A2 sweeps: normalised-CSV ingest built; adapters from run_noise_sweep/run_sample_complexity JSON still to write and spot-check", affects: [all]}
+- {id: A-011, kind: data, status: mitigated, patch: scripts/ingest_sweeps.py, title: "A1 ablation: normalised-CSV ingest built; adapter from exp1_ablation.py output still to write and spot-check", affects: [all]}
+- {id: A-012, kind: validity, status: open, title: "Portfolio Variance: R2=1.000 in-sample vs far-R2=-882.9 (seed 42) unresolved; exp1b is its seed sweep", affects: [hybrid_exp1, hybrid_exp1b]}
+- {id: A-013, kind: reproducibility, status: open, title: "MethodResult may not export engine_version / r2_far / api_calls; ingest reports gaps, never defaults", affects: [all]}
+- {id: A-014, kind: docs, status: open, title: "references.bib: 60 entries, 2 verified by search (LLM-SRBench, EQL); rest await make refs (Crossref unreachable from sandbox); target >100 not met", affects: [all]}
+- {id: A-015, kind: docs, status: fixed, title: "LICENSE.txt placeholder replaced by Apache-2.0 text", patch: LICENSE.txt, affects: [all]}
+- {id: A-016, kind: reproducibility, status: open, title: "Real experiment_protocol_*.py and run_comparative_suite_*.py absent: only fallback catalogues run here", affects: [all]}
+- {id: A-017, kind: design, status: fixed, title: "DESIGN assumed exp1b/exp3b = 'variant b'; scripts show seed sweeps; seeds per step corrected", patch: config/experiments.yml, affects: [hybrid_exp1b, hybrid_exp1b_pca, hybrid_exp3b]}
+- {id: A-018, kind: design, status: mitigated, title: "Scripts default to seed 42 only; paper design needs 5 seeds (EFFECTIVE_SEEDS in env.sh MODE=full)", patch: scripts/env.sh, affects: [hybrid_exp1, hybrid_exp1_pca, hybrid_exp2, hybrid_exp3]}
+- {id: A-019, kind: validity, status: open, title: "PCA steps are 'assumed' pure forks of the v2 backend (decision #3); byte-verify against real repo", affects: [hybrid_exp1_pca, hybrid_exp1b_pca]}
+- {id: A-020, kind: validity, status: open, title: "Dead LLM path before v5.0 (use_llm no-op): old V4/V5 numbers are pure PySR; ingest rejects engine_version<5.0", affects: [all]}
+- {id: A-021, kind: design, status: open, title: "DESIGN E8 (all-30 cross-variant) has no step in run_hybrid_all.sh; exp_cross_variant_skeleton.py is a skeleton with a stub _run_variant", affects: [all]}
+- {id: A-022, kind: validity, status: open, title: "V5 may use up to 5 PySR attempts per case vs 1 for V4 (budget confound); V5 is a retry loop, not the template-fallback described in the PDF report", affects: [hybrid_exp1, hybrid_exp2]}

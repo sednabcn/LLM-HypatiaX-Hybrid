@@ -1,0 +1,22 @@
+\section{Results}\label{sec:results}
+\ifx\datastatus\dryrunTag{\color{red}\emph{All entries in this section come from a synthetic generator and exist only to exercise the pipeline.}}\fi
+\subsection{Win rate (G1)}
+Table~\ref{tab:wr1} gives win rates on the DeFi random split and Table~\ref{tab:wr2} on Feynman; Figure~\ref{fig:wr} shows all experiments. Pairwise matrices and rank statistics are in Appendix~\ref{app:b}. Nguyen-12 steps run V7 only, so no win rate is defined there (audit A-005).
+\begin{table}[t]\centering\scriptsize\rtab{t4_winrate_exp1}\caption{Win rate, DeFi random split.}\label{tab:wr1}\end{table}
+\begin{table}[t]\centering\scriptsize\rtab{t4_winrate_exp2}\caption{Win rate, Feynman.}\label{tab:wr2}\end{table}
+\begin{figure}[t]\centering\rfig[1.0]{f3_winrate}\caption{Win rate with 95\% bootstrap CI, per experiment.}\label{fig:wr}\end{figure}
+Friedman/Nemenyi (DeFi): \safeinput{\tabdir/friedman_exp1}.\quad (Feynman): \safeinput{\tabdir/friedman_exp2}.
+\begin{table}[t]\centering\scriptsize\rtab{t7_rates_exp1}\caption{Near-perfect and catastrophic rates, DeFi.}\label{tab:rates}\end{table}
+\begin{table}[t]\centering\scriptsize\rtab{t8_decisions}\caption{Gate decision shares.}\label{tab:gate}\end{table}
+\subsection{Extrapolation by domain (G2)}
+\begin{table}[t]\centering\scriptsize\rtab{t6_domain_exp1}\caption{Median [IQR] of $\rfar$ by domain, DeFi random split.}\label{tab:dom1}\end{table}
+\begin{table}[t]\centering\scriptsize\rtab{t6_domain_exp1_pca}\caption{Same, PCA-directed split.}\label{tab:dom2}\end{table}
+\begin{table}[t]\centering\scriptsize\rtab{t6_domain_exp2}\caption{Same, Feynman domains.}\label{tab:dom3}\end{table}
+\begin{figure}[t]\centering\rfig[0.8]{f4_heatmap_exp1}\rfig[0.8]{f4_heatmap_exp2}\caption{Median far $\R$ by domain and variant (colour clipped to $[-1,1]$).}\label{fig:heat}\end{figure}
+\begin{figure}[t]\centering\rfig[0.6]{f10_random_vs_pca}\caption{Paired change in far $\R$ from random to PCA-directed split.}\label{fig:pca}\end{figure}
+\subsection{Ablations, noise and sample size}
+Seeded vs.\ unseeded (Table~\ref{tab:seed}) and noise/sample-complexity sweeps (Table~\ref{tab:noise}) are ingested through a normalised CSV contract (\texttt{scripts/ingest\_sweeps.py}); adapters from the original scripts' output are validated separately (audit A-010, A-011).
+\begin{table}[t]\centering\small\safeinput{\tabdir/t9_seeded}\caption{Seeded vs.\ unseeded.}\label{tab:seed}\end{table}
+\begin{table}[t]\centering\small\safeinput{\tabdir/t10_noise_sample}\caption{Noise and sample-size sensitivity.}\label{tab:noise}\end{table}
+\begin{figure}[t]\centering\rfig[0.48]{f7_noise}\rfig[0.48]{f8_sample_complexity}\caption{Far $\R$ versus noise level (left) and training-set size (right).}\label{fig:sweeps}\end{figure}
+\begin{table}[t]\centering\scriptsize\rtab{t13_cost_exp1}\caption{Compute and API cost per variant (DeFi).}\label{tab:cost}\end{table}

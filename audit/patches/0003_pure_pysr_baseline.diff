@@ -1,0 +1,119 @@
+--- /tmp/r0.py	2026-10-07 19:55:17.508256100 +0000
++++ rsc/experiments/benchmarks/run_comparative_hybrid_methods.py	2026-10-07 19:55:17.557807813 +0000
+@@ -166,6 +166,26 @@
+ # 2. Three new wrapper classes -- Variants 3, 6/6-PCA, 7
+ # ═══════════════════════════════════════════════════════════════════════
+ 
++def _build_pure_pysr_class(backend_mod):
++    """PATCH 0003 (audit A-009): baseline B3 = V4's engine with llm_mode='none' (pure PySR, no LLM).
++    Refuses to run if the backend class cannot be put in 'none' mode -- never silently runs an LLM mode."""
++    Base = backend_mod.SymbolicEngineMethod
++
++    class PureSymbolicPySRMethod(Base):
++        def __init__(self, verbose: bool = False):
++            try:
++                super().__init__(verbose=verbose, llm_mode="none")
++            except TypeError:
++                super().__init__(verbose=verbose)
++                if not hasattr(self, "llm_mode"):
++                    raise RuntimeError("SymbolicEngineMethod exposes no llm_mode: cannot build pure-PySR baseline (A-009)")
++                self.llm_mode = "none"
++            if getattr(self, "llm_mode", "none") != "none":
++                raise RuntimeError(f"baseline B3 must run llm_mode='none', got {self.llm_mode!r}")
++            self.name = "PureSymbolicPySR(B3)"
++    return PureSymbolicPySRMethod
++
++
+ def _build_new_wrapper_classes(backend_mod):
+     """Factory so the three new wrapper classes can subclass whichever
+     BaseMethod/MethodResult the selected backend (v2 or pca) exports,
+@@ -355,6 +375,7 @@
+         _, ImprovedNNCls = backend_mod, None
+         improved_nn_cls = getattr(backend_mod, "ImprovedNNMethod", None) or getattr(backend_mod, "ImprovedNN")
+         EnsembleLLMNNMethod, V4SelectorMethod, LLMPriorSeedingMethod = _build_new_wrapper_classes(backend_mod)
++        PureSymbolicPySRMethod = _build_pure_pysr_class(backend_mod)
+ 
+         self.REGISTRY = [
+             (1, backend_mod.PureLLMBaselineMethod),
+@@ -366,6 +387,7 @@
+             (7, EnsembleLLMNNMethod),                    # Variant 3   [NEW]
+             (8, V4SelectorMethod),                       # Variant 6/6-PCA [NEW]
+             (9, LLMPriorSeedingMethod),                  # Variant 7   [NEW]
++            (10, PureSymbolicPySRMethod),                # Baseline B3 [PATCH 0003]
+         ]
+ 
+         active = set(method_indices) if method_indices else {i for i, _ in self.REGISTRY}
+@@ -427,7 +449,7 @@
+     parser.add_argument("--domain", type=str, default="all",
+                          help="Domain key from the protocol's get_all_domains(), or 'all' (default).")
+     parser.add_argument("--methods", type=int, nargs="+", default=None, metavar="N",
+-                         help="Registry indices to run (1-9, default: all valid for --protocol).")
++                         help="Registry indices to run (1-10; 10 = pure-PySR baseline B3, opt-in; default: all valid for --protocol).")
+     parser.add_argument("--pca", action="store_true",
+                          help="Use the PCA-split backend (run_comparative_suite_benchmark_pca.py) "
+                               "instead of run_comparative_suite_benchmark_v2.py.")
+--- /tmp/s0.sh	2026-10-07 19:55:17.509691753 +0000
++++ scripts/run_hybrid_all.sh	2026-10-07 19:55:17.558190868 +0000
+@@ -121,7 +121,7 @@
+ 
+ # ── hybrid_exp1 : defi, full case set, methods 1-8 ──────────────────────
+ _EXP1_PROTOCOL="${PROTOCOL:-defi}"
+-_EXP1_METHODS="${METHODS:-1 2 3 4 5 6 7 8}"
++_EXP1_METHODS="${METHODS:-1 2 3 4 5 6 7 8 ${PYSR_BASELINE:+10}}"
+ _EXP1_PCA="${PCA_FLAG-}"
+ run hybrid_exp1 "Hybrid comparison: defi, full case set (methods 1-8)" bash -c "
+   cd '${REPO_ROOT}'
+@@ -138,7 +138,7 @@
+ 
+ # ── hybrid_exp1_pca : defi, PCA 40/60 split, methods 1-8 (assumed*) ─────
+ _EXP1PCA_PROTOCOL="${PROTOCOL:-defi}"
+-_EXP1PCA_METHODS="${METHODS:-1 2 3 4 5 6 7 8}"
++_EXP1PCA_METHODS="${METHODS:-1 2 3 4 5 6 7 8 ${PYSR_BASELINE:+10}}"
+ _EXP1PCA_PCA="${PCA_FLAG---pca}"
+ run hybrid_exp1_pca "Hybrid comparison: defi, PCA 40/60 split (methods 1-8, assumed*)" bash -c "
+   cd '${REPO_ROOT}'
+@@ -154,7 +154,7 @@
+ 
+ # ── hybrid_exp1b : defi, seed sweep, methods 1-8 ────────────────────────
+ _EXP1B_PROTOCOL="${PROTOCOL:-defi}"
+-_EXP1B_METHODS="${METHODS:-1 2 3 4 5 6 7 8}"
++_EXP1B_METHODS="${METHODS:-1 2 3 4 5 6 7 8 ${PYSR_BASELINE:+10}}"
+ _EXP1B_PCA="${PCA_FLAG-}"
+ run hybrid_exp1b "Hybrid comparison: defi, seed sweep (methods 1-8)" bash -c "
+   cd '${REPO_ROOT}'
+@@ -187,7 +187,7 @@
+ 
+ # ── hybrid_exp1b_pca : defi, PCA split, seed sweep (assumed*) ───────────
+ _EXP1BPCA_PROTOCOL="${PROTOCOL:-defi}"
+-_EXP1BPCA_METHODS="${METHODS:-1 2 3 4 5 6 7 8}"
++_EXP1BPCA_METHODS="${METHODS:-1 2 3 4 5 6 7 8 ${PYSR_BASELINE:+10}}"
+ _EXP1BPCA_PCA="${PCA_FLAG---pca}"
+ run hybrid_exp1b_pca "Hybrid comparison: defi, PCA split, seed sweep (methods 1-8, assumed*)" bash -c "
+   cd '${REPO_ROOT}'
+@@ -215,7 +215,7 @@
+ 
+ # ── hybrid_exp2 : feynman/benchmark_v2, per-domain, methods 1-7 ─────────
+ _EXP2_PROTOCOL="${PROTOCOL:-feynman}"
+-_EXP2_METHODS="${METHODS:-1 2 3 4 5 6 7}"
++_EXP2_METHODS="${METHODS:-1 2 3 4 5 6 7 ${PYSR_BASELINE:+10}}"
+ run hybrid_exp2 "Hybrid comparison: feynman, per-domain (methods 1-7)" bash -c "
+   cd '${REPO_ROOT}'
+   mkdir -p '${RESULTS_DIR}/hybrid_comparison/exp2'
+@@ -235,7 +235,7 @@
+   mkdir -p '${RESULTS_DIR}/hybrid_comparison/exp3'
+   python3 '${EXPERIMENTS_DIR}/run_comparative_hybrid_methods.py' \
+     --protocol nguyen12 \
+-    --methods 9 \
++    --methods 9 ${PYSR_BASELINE:+10} \
+     --seeds 42 \
+     ${_SAMPLE_FLAG} \
+     --output-dir '${RESULTS_DIR}/hybrid_comparison/exp3' \
+@@ -254,7 +254,7 @@
+   fi
+   python3 '${EXPERIMENTS_DIR}/run_comparative_hybrid_methods.py' \
+     --protocol nguyen12 \
+-    --methods 9 \
++    --methods 9 ${PYSR_BASELINE:+10} \
+     --seeds \"\${_SHARD_SEEDS}\" \
+     ${_SAMPLE_FLAG} \
+     --output-dir '${RESULTS_DIR}/hybrid_comparison/exp3b' \

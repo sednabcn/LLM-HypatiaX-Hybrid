@@ -1,0 +1,8 @@
+numpy
+scipy
+pandas
+matplotlib
+pyyaml
+scikit-learn
+pytest
+# real runs additionally: torch pysr(+Julia 1.10) anthropic sympy pint requests

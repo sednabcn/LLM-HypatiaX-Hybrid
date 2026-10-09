@@ -1,0 +1,7 @@
+\section{Threats to validity and audit}\label{sec:threats}
+\paragraph{Leakage.} Two classes were recorded in the source history: prompts that embedded the expected formula, and ensemble weights computed from test residuals \citep{zhang2017rethinking}. We scan prompt-building code for ground-truth tokens and residual-std expressions (Appendix~\ref{app:a}); static hits are leads for manual review, not verdicts.
+\paragraph{Dead LLM path.} Before engine v5.0 the \texttt{use\_llm} flag was a silent no-op, so ``hybrid'' V4/V5 results from older builds are pure PySR. Every stored run carries its engine version and rows below 5.0 are rejected at ingestion; rows without a version are flagged.
+\paragraph{Compute confound.} V5 may use up to five search attempts per case; win rates between V5 and single-run variants are therefore not budget-matched (Table~\ref{tab:cost}).
+\paragraph{Non-determinism.} LLM output at temperature 0 is not guaranteed byte-identical across requests; a freeze cache removes variance only for repeated prompts. Seeds, engine version, git SHA and API-call counts are stored per run.
+\paragraph{Audit register.} Table~\ref{tab:audit} lists issues, patches and the fix rate.
+\begin{table}[t]\centering\scriptsize\rtab{t12_audit}\caption{Audit register.}\label{tab:audit}\end{table}
