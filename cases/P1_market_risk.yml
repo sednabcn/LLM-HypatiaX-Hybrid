@@ -1,0 +1,20 @@
+# P1 - Market risk and model validation. STATUS: EMPTY (drafting starts at PLAYBOOK step 3.1, after steps 0-2).
+# Target: 30 cases = 10 canonical + 10 perturbed + 10 composed. Every case needs a verified source.
+# TEMPLATE (do not uncomment without a verified source):
+#  - id: P1-001
+#    name: "<short name>"                 # shown to the LLM in the 'semantic' view only
+#    family: <family_key>                 # related cases share a family (bootstrap resamples families)
+#    tier: canonical | perturbed | composed
+#    derived_from: P1-0xx                 # perturbed: one id; composed: a list of >= 2 ids; canonical: omit
+#    target: y
+#    formula: "<sympy-parsable>"          # ground truth: NEVER shown to the LLM
+#    constants: {name: value}
+#    variables: {v: {train: [lo, hi], far: [lo, hi], unit: "..."}}
+#    description: "<what the quantity means, with NO formula, '=', '**' or '^'>"
+#    source: "<citation or URL>"
+#    source_verified: false               # set true only after the source was checked
+#    memorisation_risk: high | medium | low
+#    scale_note: "<needed only for extreme output scales>"
+protocol: P1
+version: 0
+cases: []
