@@ -16,3 +16,4 @@ paper/*.fdb_latexmk
 rsc/db/results_dryrun.sqlite
 external/
 .pytest_cache/
+docs/state.json
