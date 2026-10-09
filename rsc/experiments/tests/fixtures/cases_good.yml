@@ -1,0 +1,15 @@
+# SYNTHETIC fixtures for the validator tests. Not real benchmark cases.
+protocol: T
+cases:
+  - {id: T-001, name: "Toy quadratic energy", family: toy_energy, tier: canonical, target: y, memorisation_risk: high,
+     formula: "k * m * v**2", constants: {k: 0.5},
+     variables: {m: {train: [1, 5], far: [1, 5]}, v: {train: [1, 10], far: [20, 40]}},
+     description: "A quantity that depends on a mass and a speed.", source: "synthetic", source_verified: true}
+  - {id: T-002, name: "Toy cubic energy", family: toy_energy, tier: perturbed, derived_from: T-001, target: y, memorisation_risk: low,
+     formula: "k * m * v**3", constants: {k: 0.5},
+     variables: {m: {train: [1, 5], far: [1, 5]}, v: {train: [1, 10], far: [20, 40]}},
+     description: "A related quantity with a stronger dependence on speed.", source: "synthetic", source_verified: true}
+  - {id: T-003, name: "Toy composed", family: toy_comp, tier: composed, derived_from: [T-001, T-002], target: y, memorisation_risk: low,
+     formula: "k * m * v**2 + c * m * v**3", constants: {k: 0.5, c: 0.1},
+     variables: {m: {train: [1, 5], far: [1, 5]}, v: {train: [1, 10], far: [20, 40]}},
+     description: "A combined quantity built from the two toy relations.", source: "synthetic", source_verified: true}

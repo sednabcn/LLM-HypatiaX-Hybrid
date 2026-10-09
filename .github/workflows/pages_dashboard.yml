@@ -1,0 +1,38 @@
+name: state-dashboard
+# Publishes docs/ (dashboard + state.json) to GitHub Pages on every push to main.
+# Data status is honest: REAL only if results/ is committed and ingests cleanly; otherwise the synthetic
+# plumbing DB is built and the dashboard shows a DRYRUN banner.
+on:
+  push: {branches: [main]}
+  workflow_dispatch:
+permissions: {contents: read, pages: write, id-token: write}
+concurrency: {group: pages, cancel-in-progress: true}
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - run: pip install numpy scipy pandas matplotlib pyyaml scikit-learn pytest
+      - name: Build DB (real if results/ exists, else synthetic dry-run)
+        run: |
+          if [ -d results/hybrid_comparison ]; then
+            python scripts/ingest_results.py results --reset
+            [ ! -f results/sweeps/sweeps.csv ] || python scripts/ingest_sweeps.py results/sweeps/sweeps.csv --reset-sweeps
+          else
+            rm -rf /tmp/hx_dry && python rsc/tools/synth_results.py /tmp/hx_dry
+            python scripts/ingest_results.py /tmp/hx_dry --dryrun --reset
+            python scripts/ingest_sweeps.py /tmp/hx_dry/sweeps/sweeps.csv --dryrun --reset-sweeps
+          fi
+      - run: python scripts/export_state.py
+      - run: python scripts/export_state.py --out /tmp/s.json >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-pages-artifact@v3
+        with: {path: docs}
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: {name: github-pages, url: "${{ steps.d.outputs.page_url }}"}
+    steps:
+      - id: d
+        uses: actions/deploy-pages@v4

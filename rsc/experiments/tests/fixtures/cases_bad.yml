@@ -1,0 +1,23 @@
+# SYNTHETIC fixtures: every case plants exactly one defect; the test asserts the validator reports it.
+protocol: B
+cases:
+  - {id: B-001, name: "Base", family: f, tier: canonical, target: y, memorisation_risk: high, formula: "a * x**2", constants: {a: 2.0},
+     variables: {x: {train: [1, 5], far: [10, 20]}}, description: "base case", source: "synthetic"}
+  - {id: B-002, name: "Dup structure", family: f, tier: canonical, target: y, memorisation_risk: high, formula: "b * z**2", constants: {b: 3.0},
+     variables: {z: {train: [2, 6], far: [10, 20]}}, description: "same structure, other names", source: "synthetic"}
+  - {id: B-003, name: "Ratio bug", family: f, tier: canonical, target: y, memorisation_risk: high, formula: "x / (x + 1e-10)",
+     variables: {x: {train: [100, 100000], far: [200000, 300000]}},
+     description: "ratio that is about 1 everywhere", source: "synthetic"}
+  - {id: B-004, name: "Nonfinite far", family: f, tier: canonical, target: y, memorisation_risk: high, formula: "log(x - 5)",
+     variables: {x: {train: [6, 8], far: [1, 3]}}, description: "log case", source: "synthetic"}
+  - {id: B-005, name: "No extrapolation", family: f, tier: canonical, target: y, memorisation_risk: high, formula: "sin(x) + x",
+     variables: {x: {train: [1, 10], far: [2, 9]}}, description: "far inside train", source: "synthetic"}
+  - {id: B-006, name: "Leaky description", family: f, tier: canonical, target: y, memorisation_risk: high, formula: "x**3 + x",
+     variables: {x: {train: [1, 3], far: [5, 6]}}, description: "y = x**3 + x", source: "synthetic"}
+  - {id: B-007, name: "Bad parent", family: f, tier: perturbed, derived_from: B-999, target: y, memorisation_risk: low, formula: "x**4",
+     variables: {x: {train: [1, 3], far: [5, 6]}}, description: "orphan", source: "synthetic"}
+  - {id: B-008, name: "Tiny scale", family: f, tier: canonical, target: y, memorisation_risk: high, formula: "g * m1 * m2 / r**2", constants: {g: 6.674e-11},
+     variables: {m1: {train: [1, 2], far: [3, 4]}, m2: {train: [1, 2], far: [3, 4]}, r: {train: [1, 2], far: [3, 4]}},
+     description: "tiny outputs", source: "synthetic"}
+  - {id: B-009, name: "No source", family: f, tier: canonical, target: y, memorisation_risk: high, formula: "x**5",
+     variables: {x: {train: [1, 3], far: [5, 6]}}, description: "no source field"}
