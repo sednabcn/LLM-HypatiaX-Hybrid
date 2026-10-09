@@ -15,7 +15,7 @@
    Private repo: Pages visibility needs a plan that supports it; otherwise open the `state-and-db` artifact from the Actions run, or run `python -m http.server -d docs` after `python scripts/export_state.py`.
 
 ## Local preview
-    make dryrun-db-only   # or the three ingest commands in pages_dashboard.yml
+    # build a DB first: the 'Build DB' step in .github/workflows/pages_dashboard.yml, run locally
     python scripts/export_state.py && python -m http.server -d docs 8000
 
 The banner shows REAL / DRYRUN / NONE from the DB that was actually read, so a synthetic build can never look like a result.
