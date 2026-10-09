@@ -1,0 +1,412 @@
+From c9ab61061ac046dcabfdc877b6441bea26b2b4ab Mon Sep 17 00:00:00 2001
+From: agent <agent@example.org>
+Date: Fri, 9 Oct 2026 18:35:28 +0000
+Subject: [PATCH 1/2] Add GitHub<->web bridge: state export, Pages dashboard,
+ issue sync, results-branch ingest, PROJECT_STATE.md
+
+---
+ .github/workflows/ingest_results_branch.yml | 22 ++++++
+ .github/workflows/pages_dashboard.yml       | 38 +++++++++
+ .gitignore                                  |  1 +
+ PROJECT_STATE.md                            | 18 +++++
+ docs/BRIDGE.md                              | 21 +++++
+ docs/index.html                             | 64 +++++++++++++++
+ scripts/export_state.py                     | 86 +++++++++++++++++++++
+ scripts/sync_issues.py                      | 59 ++++++++++++++
+ 8 files changed, 309 insertions(+)
+ create mode 100644 .github/workflows/ingest_results_branch.yml
+ create mode 100644 .github/workflows/pages_dashboard.yml
+ create mode 100644 PROJECT_STATE.md
+ create mode 100644 docs/BRIDGE.md
+ create mode 100644 docs/index.html
+ create mode 100755 scripts/export_state.py
+ create mode 100755 scripts/sync_issues.py
+
+diff --git a/.github/workflows/ingest_results_branch.yml b/.github/workflows/ingest_results_branch.yml
+new file mode 100644
+index 0000000..46cae96
+--- /dev/null
++++ b/.github/workflows/ingest_results_branch.yml
+@@ -0,0 +1,22 @@
++name: ingest-results
++# You push real result JSONs to a branch named results/<run-id> (layout: results/hybrid_comparison/<exp>/*.json).
++# This validates them with the real guards (synthetic rows and engine<5.0 are refused) and reports in the job summary.
++# It does NOT merge anything: review the summary, then open a PR for the branch.
++on:
++  push: {branches: ["results/**"]}
++jobs:
++  ingest:
++    runs-on: ubuntu-latest
++    steps:
++      - uses: actions/checkout@v4
++      - uses: actions/setup-python@v5
++        with: {python-version: "3.11"}
++      - run: pip install numpy scipy pandas matplotlib pyyaml scikit-learn pytest
++      - name: Ingest + audit
++        run: |
++          set -o pipefail
++          { echo '### ingest'; python scripts/ingest_results.py results --reset; } 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
++          { echo '### audit'; python rsc/experiments/analytics/audit_checks.py; } 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
++          python scripts/export_state.py --out /tmp/state.json | tee -a "$GITHUB_STEP_SUMMARY"
++      - uses: actions/upload-artifact@v4
++        with: {name: state-and-db, path: "/tmp/state.json\nrsc/db/results.sqlite"}
+diff --git a/.github/workflows/pages_dashboard.yml b/.github/workflows/pages_dashboard.yml
+new file mode 100644
+index 0000000..0339bfe
+--- /dev/null
++++ b/.github/workflows/pages_dashboard.yml
+@@ -0,0 +1,38 @@
++name: state-dashboard
++# Publishes docs/ (dashboard + state.json) to GitHub Pages on every push to main.
++# Data status is honest: REAL only if results/ is committed and ingests cleanly; otherwise the synthetic
++# plumbing DB is built and the dashboard shows a DRYRUN banner.
++on:
++  push: {branches: [main]}
++  workflow_dispatch:
++permissions: {contents: read, pages: write, id-token: write}
++concurrency: {group: pages, cancel-in-progress: true}
++jobs:
++  build:
++    runs-on: ubuntu-latest
++    steps:
++      - uses: actions/checkout@v4
++      - uses: actions/setup-python@v5
++        with: {python-version: "3.11"}
++      - run: pip install numpy scipy pandas matplotlib pyyaml scikit-learn pytest
++      - name: Build DB (real if results/ exists, else synthetic dry-run)
++        run: |
++          if [ -d results/hybrid_comparison ]; then
++            python scripts/ingest_results.py results --reset
++            [ ! -f results/sweeps/sweeps.csv ] || python scripts/ingest_sweeps.py results/sweeps/sweeps.csv --reset-sweeps
++          else
++            rm -rf /tmp/hx_dry && python rsc/tools/synth_results.py /tmp/hx_dry
++            python scripts/ingest_results.py /tmp/hx_dry --dryrun --reset
++            python scripts/ingest_sweeps.py /tmp/hx_dry/sweeps/sweeps.csv --dryrun --reset-sweeps
++          fi
++      - run: python scripts/export_state.py
++      - run: python scripts/export_state.py --out /tmp/s.json >> "$GITHUB_STEP_SUMMARY"
++      - uses: actions/upload-pages-artifact@v3
++        with: {path: docs}
++  deploy:
++    needs: build
++    runs-on: ubuntu-latest
++    environment: {name: github-pages, url: "${{ steps.d.outputs.page_url }}"}
++    steps:
++      - id: d
++        uses: actions/deploy-pages@v4
+diff --git a/.gitignore b/.gitignore
+index 117a00d..fe160ee 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -16,3 +16,4 @@ paper/*.fdb_latexmk
+ rsc/db/results_dryrun.sqlite
+ external/
+ .pytest_cache/
++docs/state.json
+diff --git a/PROJECT_STATE.md b/PROJECT_STATE.md
+new file mode 100644
+index 0000000..98dfd38
+--- /dev/null
++++ b/PROJECT_STATE.md
+@@ -0,0 +1,18 @@
++---
++step: "Phase 4 - real runs not started; bridge (GitHub <-> web) being added"
++next_action: "Place real LLM-HypatiaX-REPRO beside this repo (A-016), run `source scripts/env.sh smoke`, then smoke-run exp1 and ingest"
++blockers: [A-016, A-014, A-006, A-007, A-012, A-020]
++updated: 2026-10-09
++---
++# PROJECT_STATE
++
++Paste or upload this file (or the Pages dashboard link) at the start of every agent session.
++The YAML header above is machine-read by `scripts/export_state.py` -> `docs/state.json` -> dashboard.
++
++## Rules
++- Real numbers enter the repo only through `scripts/ingest_results.py` (never hand-typed).
++- Agent changes arrive as a PR from a `agent/*` branch or as a `.patch` for `git am`.
++- Update `step`, `next_action`, `blockers`, `updated` at the end of every session.
++
++## Log
++- 2026-10-09: added state export, Pages dashboard, issue sync, results-branch workflow.
+diff --git a/docs/BRIDGE.md b/docs/BRIDGE.md
+new file mode 100644
+index 0000000..0c45513
+--- /dev/null
++++ b/docs/BRIDGE.md
+@@ -0,0 +1,21 @@
++# GitHub <-> web interface bridge
++
++| Direction | Mechanism |
++|---|---|
++| repo -> web | `pages_dashboard.yml` builds `docs/state.json` (via `scripts/export_state.py`) and publishes `docs/` to GitHub Pages |
++| agent -> repo | PR from an `agent/<topic>` branch, or a `.patch` applied with `git am` (never direct to `main`) |
++| your runs -> repo | push result JSONs to `results/<run-id>`; `ingest_results_branch.yml` validates and writes a job summary; then open a PR |
++| audit <-> Issues | `python scripts/sync_issues.py [--apply]` (issues.yml is the source of truth; GitHub-side closures are reported as DRIFT) |
++| session handoff | `PROJECT_STATE.md` (YAML header: step, next_action, blockers, updated) |
++
++## One-time setup
++1. Repo -> Settings -> Pages -> Source: **GitHub Actions**.
++2. Settings -> Actions -> General -> allow workflows to read/write (needed only for `sync_issues.py --apply` in CI; locally use `gh auth login`).
++3. Merge to `main`; the dashboard appears at `https://<user>.github.io/<repo>/`.
++   Private repo: Pages visibility needs a plan that supports it; otherwise open the `state-and-db` artifact from the Actions run, or run `python -m http.server -d docs` after `python scripts/export_state.py`.
++
++## Local preview
++    make dryrun-db-only   # or the three ingest commands in pages_dashboard.yml
++    python scripts/export_state.py && python -m http.server -d docs 8000
++
++The banner shows REAL / DRYRUN / NONE from the DB that was actually read, so a synthetic build can never look like a result.
+diff --git a/docs/index.html b/docs/index.html
+new file mode 100644
+index 0000000..f68e096
+--- /dev/null
++++ b/docs/index.html
+@@ -0,0 +1,64 @@
++<!doctype html>
++<html lang="en"><head><meta charset="utf-8">
++<meta name="viewport" content="width=device-width,initial-scale=1">
++<title>HypatiaX control room</title>
++<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
++<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=Public+Sans:wght@400;600&display=swap" rel="stylesheet">
++<style>
++:root{--bg:#f2f4ef;--ink:#17252b;--mut:#5b6b70;--line:#cfd7d2;--card:#fbfcfa;--real:#0b6b5f;--dry:#a4300f;--none:#6b6f3a;--open:#a4300f;--mit:#8a6a00;--fix:#0b6b5f}
++@media(prefers-color-scheme:dark){:root{--bg:#10191c;--ink:#e3ece8;--mut:#93a5a8;--line:#2a3a3f;--card:#16232744;--real:#4cc2ae;--dry:#ff8a65;--none:#c4c870;--open:#ff8a65;--mit:#e5bf4a;--fix:#4cc2ae}}
++*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 "Public Sans",system-ui,sans-serif}
++main{max-width:1000px;margin:0 auto;padding:0 20px 60px}
++h1,h2{font-family:Fraunces,Georgia,serif;font-weight:700;margin:0}
++#banner{padding:22px 20px;border-bottom:3px solid var(--c);color:var(--c);background:repeating-linear-gradient(135deg,transparent 0 14px,color-mix(in srgb,var(--c) 10%,transparent) 14px 28px)}
++#banner .in{max-width:1000px;margin:0 auto;display:flex;flex-wrap:wrap;gap:6px 24px;align-items:baseline}
++#banner h1{font-size:clamp(1.6rem,5vw,2.6rem);color:var(--c)}#banner p{margin:0;color:var(--ink)}
++section{margin-top:34px}h2{font-size:1.35rem;margin-bottom:10px}
++.next{border-left:4px solid var(--ink);padding:4px 0 4px 16px;font-size:1.1rem}
++.meta{color:var(--mut);font-size:.9rem}
++table{border-collapse:collapse;width:100%;font-size:.92rem}th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--line);vertical-align:top}
++th{font-weight:600;color:var(--mut)}td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}
++.wrap{overflow-x:auto}
++.bar{height:10px;background:var(--line);border-radius:5px;overflow:hidden;display:flex;max-width:420px}.bar i{display:block;height:100%}
++.pill{display:inline-block;padding:1px 9px;border-radius:10px;font-size:.8rem;border:1px solid currentColor}
++.fixed{color:var(--fix)}.open{color:var(--open)}.mitigated{color:var(--mit)}
++.tabs button{font:inherit;background:none;border:1px solid var(--line);padding:3px 12px;border-radius:14px;color:var(--ink);cursor:pointer;margin:0 6px 8px 0}
++.tabs button[aria-pressed=true]{background:var(--ink);color:var(--bg)}
++button:focus-visible{outline:2px solid var(--real);outline-offset:2px}
++pre{background:var(--card);border:1px solid var(--line);padding:10px;overflow-x:auto;font-size:.82rem;white-space:pre-wrap}
++</style></head><body>
++<div id="banner" style="--c:var(--none)"><div class="in"><h1 id="st">Loading…</h1><p id="stsub"></p></div></div>
++<main>
++<section><h2>Next action</h2><div class="next" id="next"></div><p class="meta" id="blk"></p></section>
++<section><h2>Audit register</h2><div class="bar" id="abar"></div><p class="meta" id="asum"></p>
++<div class="tabs" id="tabs"></div><div class="wrap"><table id="audit"></table></div></section>
++<section><h2>Runs in the database</h2><div class="wrap"><table id="runs"></table></div><p class="meta" id="rsum"></p></section>
++<section><h2>References</h2><div class="bar" id="rbar"></div><p class="meta" id="rtxt"></p></section>
++<section><h2>Release gate</h2><pre id="gate"></pre></section>
++<p class="meta" id="foot"></p>
++</main>
++<script>
++const $=id=>document.getElementById(id), esc=s=>String(s??"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
++fetch("state.json",{cache:"no-store"}).then(r=>r.json()).then(s=>{
++  const st=s.data_status, col={REAL:"--real",DRYRUN:"--dry",NONE:"--none"}[st];
++  $("banner").style.setProperty("--c",`var(${col})`);
++  $("st").textContent={REAL:"Real results",DRYRUN:"Synthetic dry-run: not findings",NONE:"No results ingested yet"}[st];
++  $("stsub").textContent={REAL:"Numbers come from ingested experiment runs.",DRYRUN:"Plumbing check only. Nothing here may enter the paper.",NONE:"Run experiments, then ingest."}[st];
++  const p=s.project||{};
++  $("next").textContent=p.next_action||"PROJECT_STATE.md not found";
++  $("blk").textContent=(p.step?p.step+". ":"")+(p.blockers?.length?"Blockers: "+p.blockers.join(", "):"");
++  const a=s.audit, pc=k=>(100*a[k]/a.total)+"%";
++  $("abar").innerHTML=`<i style="width:${pc("fixed")};background:var(--fix)"></i><i style="width:${pc("mitigated")};background:var(--mit)"></i><i style="width:${pc("open")};background:var(--open)"></i>`;
++  $("asum").textContent=`${a.fixed} fixed, ${a.mitigated} mitigated, ${a.open} open of ${a.total} (fix rate ${Math.round(a.fix_rate*100)}%)`;
++  let f="all";const draw=()=>{$("audit").innerHTML="<tr><th>ID<th>Kind<th>Status<th>Issue</tr>"+a.items.filter(i=>f=="all"||i.status==f).map(i=>`<tr><td>${esc(i.id)}<td>${esc(i.kind)}<td><span class="pill ${i.status}">${i.status}</span><td>${esc(i.title)}</tr>`).join("");
++    $("tabs").innerHTML=["all","open","mitigated","fixed"].map(k=>`<button aria-pressed="${k==f}" data-k="${k}">${k}</button>`).join("");
++    $("tabs").querySelectorAll("button").forEach(b=>b.onclick=()=>{f=b.dataset.k;draw()})};draw();
++  const r=s.runs;
++  $("runs").innerHTML="<tr><th>Experiment<th class=n>Runs<th class=n>Seeds<th class=n>Variants<th class=n>Cases<th class=n>Synthetic</tr>"+(r.by_exp.map(e=>`<tr><td>${esc(e.exp_id)}<td class=n>${e.runs}<td class=n>${e.seeds}<td class=n>${e.variants}<td class=n>${e.cases}<td class=n>${e.synthetic}</tr>`).join("")||"<tr><td colspan=6>No runs.</tr>");
++  $("rsum").textContent=r.db?`${r.total} runs, ${r.sweep_rows} sweep rows (${r.db})`:"";
++  const f2=s.refs;$("rbar").innerHTML=`<i style="width:${100*f2.verified/f2.target}%;background:var(--real)"></i>`;
++  $("rtxt").textContent=`${f2.verified} verified of ${f2.total} entries; target ${f2.target}+ verified.`;
++  $("gate").textContent=(s.release_gate.ok?"PASS":"BLOCKED")+"\n"+(s.release_gate.output||"");
++  $("foot").textContent=`commit ${s.git_sha||"?"}, generated ${s.generated_at}`;
++}).catch(e=>{$("st").textContent="state.json not found";$("stsub").textContent="Run scripts/export_state.py or wait for the Pages workflow."});
++</script></body></html>
+diff --git a/scripts/export_state.py b/scripts/export_state.py
+new file mode 100755
+index 0000000..6c93691
+--- /dev/null
++++ b/scripts/export_state.py
+@@ -0,0 +1,86 @@
++#!/usr/bin/env python3
++"""Export the repo's research state to docs/state.json (read by docs/index.html).
++
++Sources: PROJECT_STATE.md (YAML header), audit/issues/issues.yml, SQLite DB (real if present, else
++dry-run, else none), paper/references.bib, .github/scripts/assert_real_build.py (release gate).
++data_status: REAL (results.sqlite) | DRYRUN (synthetic plumbing DB only) | NONE.
++Never invents numbers: anything unavailable is null.
++"""
++from __future__ import annotations
++import argparse, datetime as dt, json, os, pathlib, re, sqlite3, subprocess, sys
++import yaml
++
++ROOT = pathlib.Path(__file__).resolve().parents[1]
++
++def project_state():
++    p = ROOT / "PROJECT_STATE.md"
++    if not p.exists():
++        return {"missing": True}
++    m = re.match(r"^---\n(.*?)\n---\n(.*)$", p.read_text(), re.S)
++    head = yaml.safe_load(m.group(1)) if m else {}
++    head = {k: (str(v) if isinstance(v, dt.date) else v) for k, v in (head or {}).items()}
++    return head
++
++def audit():
++    items = yaml.safe_load((ROOT / "audit/issues/issues.yml").read_text())["issues"]
++    n = len(items); c = {"fixed": 0, "open": 0, "mitigated": 0}
++    for i in items:
++        c[i["status"]] = c.get(i["status"], 0) + 1
++    return {"total": n, **c, "fix_rate": round(c["fixed"] / n, 3) if n else None, "items": items}
++
++def runs(db_dir: pathlib.Path):
++    for name, status in (("results.sqlite", "REAL"), ("results_dryrun.sqlite", "DRYRUN")):
++        p = db_dir / name
++        if p.exists():
++            con = sqlite3.connect(p)
++            rows = con.execute("select exp_id,count(*),count(distinct seed),count(distinct variant_id),"
++                               "count(distinct case_id),coalesce(sum(is_synthetic),0) from run group by 1 order by 1").fetchall()
++            sw = con.execute("select count(*) from sweep").fetchone()[0]
++            return status, {"db": name, "sweep_rows": sw, "total": sum(r[1] for r in rows),
++                            "by_exp": [dict(zip(("exp_id", "runs", "seeds", "variants", "cases", "synthetic"), r)) for r in rows]}
++    return "NONE", {"db": None, "sweep_rows": 0, "total": 0, "by_exp": []}
++
++def refs():
++    t = (ROOT / "paper/references.bib").read_text()
++    total = len(re.findall(r"^@\w+\{", t, re.M))
++    ver = len(re.findall(r"status:\s*verified", t, re.I))
++    return {"total": total, "verified": ver, "target": 100}
++
++def gate():
++    s = ROOT / ".github/scripts/assert_real_build.py"
++    if not s.exists():
++        return {"ok": None, "output": "assert_real_build.py missing"}
++    r = subprocess.run([sys.executable, str(s)], capture_output=True, text=True, cwd=ROOT)
++    return {"ok": r.returncode == 0, "output": (r.stdout + r.stderr).strip()[-600:]}
++
++def git(*a):
++    try:
++        return subprocess.check_output(["git", *a], cwd=ROOT, text=True, stderr=subprocess.DEVNULL).strip()
++    except Exception:
++        return None
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--out", default=str(ROOT / "docs/state.json"))
++    ap.add_argument("--db-dir", default=os.environ.get("HYPATIAX_DB_DIR", str(ROOT / "rsc/db")))
++    a = ap.parse_args()
++    status, r = runs(pathlib.Path(a.db_dir))
++    state = {
++        "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
++        "git_sha": os.environ.get("GITHUB_SHA", git("rev-parse", "HEAD") or "")[:7] or None,
++        "repo": os.environ.get("GITHUB_REPOSITORY"),
++        "data_status": status,
++        "project": project_state(),
++        "audit": audit(),
++        "runs": r,
++        "refs": refs(),
++        "release_gate": gate(),
++    }
++    out = pathlib.Path(a.out); out.parent.mkdir(parents=True, exist_ok=True)
++    out.write_text(json.dumps(state, indent=1, default=str))
++    au = state["audit"]
++    print(f"[state] {status} | runs={r['total']} | audit {au['fixed']}/{au['total']} fixed | "
++          f"refs {state['refs']['verified']}/{state['refs']['total']} verified | gate_ok={state['release_gate']['ok']} -> {out}")
++
++if __name__ == "__main__":
++    main()
+diff --git a/scripts/sync_issues.py b/scripts/sync_issues.py
+new file mode 100755
+index 0000000..51e38c5
+--- /dev/null
++++ b/scripts/sync_issues.py
+@@ -0,0 +1,59 @@
++#!/usr/bin/env python3
++"""Mirror audit/issues/issues.yml to GitHub Issues (issues.yml stays the source of truth).
++
++  python scripts/sync_issues.py            # dry run: print what would change
++  python scripts/sync_issues.py --apply    # create/update/close via the `gh` CLI (needs GH_TOKEN, issues:write)
++
++Issue title = "[A-0xx] <title>"; labels: audit, kind:<kind>, status:<status>. status fixed -> issue closed.
++Drift report: issues closed on GitHub while still open/mitigated in issues.yml are LISTED, never auto-edited
++(change issues.yml through a PR, so the register stays reviewable).
++"""
++import argparse, json, pathlib, subprocess, sys
++import yaml
++
++ROOT = pathlib.Path(__file__).resolve().parents[1]
++
++def gh(*args, check=True):
++    import shutil
++    if shutil.which("gh") is None:
++        if "--apply" in sys.argv:
++            sys.exit("gh CLI not found (needed for --apply)")
++        return "[]"   # dry run without gh: pretend no issues exist yet
++    return subprocess.run(["gh", *args], capture_output=True, text=True, check=check, cwd=ROOT).stdout
++
++def main():
++    ap = argparse.ArgumentParser(); ap.add_argument("--apply", action="store_true"); a = ap.parse_args()
++    items = yaml.safe_load((ROOT / "audit/issues/issues.yml").read_text())["issues"]
++    existing = json.loads(gh("issue", "list", "--label", "audit", "--state", "all", "--limit", "300",
++                             "--json", "number,title,state,labels") or "[]")
++    by_id = {e["title"].split("]")[0].lstrip("["): e for e in existing if e["title"].startswith("[A-")}
++    for it in items:
++        title = f"[{it['id']}] {it['title']}"
++        want = ["audit", f"kind:{it['kind']}", f"status:{it['status']}"]
++        body = f"Affects: {', '.join(it.get('affects', []))}\nPatch: {it.get('patch', '-')}\n\n_Mirrored from audit/issues/issues.yml - edit there, not here._"
++        e = by_id.get(it["id"])
++        if e is None:
++            print(f"CREATE  {title}")
++            if a.apply:
++                for l in want: gh("label", "create", l, "--force", check=False)
++                gh("issue", "create", "--title", title, "--body", body, *sum((["--label", l] for l in want), []))
++                if it["status"] == "fixed":
++                    n = json.loads(gh("issue", "list", "--search", f"[{it['id']}] in:title", "--state", "open", "--json", "number"))[0]["number"]
++                    gh("issue", "close", str(n))
++            continue
++        have = {l["name"] for l in e["labels"]}
++        stale = {l for l in have if l.startswith("status:")} - set(want)
++        if stale or not set(want) <= have or (it["status"] == "fixed") != (e["state"] == "CLOSED"):
++            print(f"UPDATE  #{e['number']} {it['id']} -> {it['status']}")
++            if a.apply:
++                for l in want: gh("label", "create", l, "--force", check=False)
++                gh("issue", "edit", str(e["number"]), "--title", title,
++                   *sum((["--add-label", l] for l in want), []), *sum((["--remove-label", l] for l in stale), []))
++                gh("issue", "close" if it["status"] == "fixed" else "reopen", str(e["number"]))
++        if e["state"] == "CLOSED" and it["status"] != "fixed":
++            print(f"DRIFT   #{e['number']} {it['id']} closed on GitHub but '{it['status']}' in issues.yml -> review & update issues.yml via PR")
++    if not a.apply:
++        print("(dry run - nothing changed; use --apply)")
++
++if __name__ == "__main__":
++    sys.exit(main())
+-- 
+2.43.0
+
+
+From 0e9015c67d4ca7370b0f7c15c6b8e96ef4255ddd Mon Sep 17 00:00:00 2001
+From: agent <agent@example.org>
+Date: Fri, 9 Oct 2026 18:35:36 +0000
+Subject: [PATCH 2/2] docs: fix local preview note
+
+---
+ docs/BRIDGE.md | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/docs/BRIDGE.md b/docs/BRIDGE.md
+index 0c45513..9be4e0b 100644
+--- a/docs/BRIDGE.md
++++ b/docs/BRIDGE.md
+@@ -15,7 +15,7 @@
+    Private repo: Pages visibility needs a plan that supports it; otherwise open the `state-and-db` artifact from the Actions run, or run `python -m http.server -d docs` after `python scripts/export_state.py`.
+ 
+ ## Local preview
+-    make dryrun-db-only   # or the three ingest commands in pages_dashboard.yml
++    # build a DB first: the 'Build DB' step in .github/workflows/pages_dashboard.yml, run locally
+     python scripts/export_state.py && python -m http.server -d docs 8000
+ 
+ The banner shows REAL / DRYRUN / NONE from the DB that was actually read, so a synthetic build can never look like a result.
+-- 
+2.43.0
+
