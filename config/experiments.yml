@@ -1,0 +1,15 @@
+# step -> protocol / split / registry methods. Mirrors scripts/run_hybrid_all.sh (verified line-by-line, see audit A-004).
+# Registry indices -> variant ids live in config/variants.yml. V7 runs ONLY on nguyen12 (capability gate).
+experiments:
+  hybrid_exp1:      {seeds: [42], dir: exp1,      protocol: defi,     split: random, registry: [1,2,3,4,5,6,7,8], section: "5.1", goal: G1}
+  hybrid_exp1_pca:  {seeds: [42], dir: exp1_pca,  protocol: defi,     split: pca,    registry: [1,2,3,4,5,6,7,8], section: "5.2", goal: G2}
+  hybrid_exp1b:     {seeds: [42,99,123,777,2024], note: 'Portfolio-Variance seed sweep = audit A3 data', dir: exp1b,     protocol: defi,     split: random, registry: [1,2,3,4,5,6,7,8], section: "5.1", goal: G1}
+  hybrid_exp1b_pca: {seeds: [42,99,123,777,2024], note: 'Portfolio-Variance seed sweep, PCA', dir: exp1b_pca, protocol: defi,     split: pca,    registry: [1,2,3,4,5,6,7,8], section: "5.2", goal: G2}
+  hybrid_exp2:      {seeds: [42], dir: exp2,      protocol: feynman,  split: far,    registry: [1,2,3,4,5,6,7],   section: "5.1/5.2", goal: "G1,G2"}
+  hybrid_exp3:      {seeds: [42], dir: exp3,      protocol: nguyen12, split: far,    registry: [9],               section: "5.1", goal: G1}
+  hybrid_exp3b:     {seeds: [99,123,777,2024], dir: exp3b,     protocol: nguyen12, split: far,    registry: [9],               section: "5.3", goal: G1}
+baselines_optional: [B_PYSR]   # method 10, enabled with PYSR_BASELINE=1 (env.sh full). Without it nguyen12 has no baseline (A-005)
+# Defaults above are what scripts/run_hybrid_all.sh runs. For the paper's 5-seed design export
+# EFFECTIVE_SEEDS=42,43,44,45,46 (scripts/env.sh MODE=full does this for exp1,exp1_pca,exp2,exp3).
+full_seeds: [42, 43, 44, 45, 46]
+smoke: {seeds: [42], sample_cases: 2, pysr_generations: 200}

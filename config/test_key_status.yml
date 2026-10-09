@@ -1,0 +1,1 @@
+ANTHROPIC_API_KEY: {required_for: [V1,V2,V3,V4,V5,V6,V7,LLM], smoke_without_key: mock}

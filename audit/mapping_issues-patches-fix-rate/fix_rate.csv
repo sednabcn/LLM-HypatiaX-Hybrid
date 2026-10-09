@@ -1,0 +1,9 @@
+affects,issues,fixed,fix_rate
+all,13,5,0.38
+hybrid_exp1,6,0,0.00
+hybrid_exp1_pca,2,0,0.00
+hybrid_exp1b,2,1,0.50
+hybrid_exp1b_pca,2,1,0.50
+hybrid_exp2,5,0,0.00
+hybrid_exp3,2,0,0.00
+hybrid_exp3b,2,1,0.50

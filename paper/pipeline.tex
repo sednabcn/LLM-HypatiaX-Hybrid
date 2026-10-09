@@ -1,0 +1,6 @@
+\resizebox{\linewidth}{!}{\begin{tikzpicture}[node distance=7mm,every node/.style={draw,rounded corners=3pt,align=center,font=\scriptsize,fill=blue!5,inner sep=3pt}]
+\node(a){variant package\\+ real repo};\node[right=of a](b){run\_hybrid\_all.sh\\7 steps};\node[right=of b](c){result JSON};
+\node[right=of c](d){ingest\\(guards)};\node[right=of d](e){SQLite};\node[right=of e](f){stats\\tables, figures};\node[right=of f](g){LaTeX\\paper};
+\node[below=of e,fill=red!8](h){audit checks\\issues / patches};
+\foreach\x/\y in {a/b,b/c,c/d,d/e,e/f,f/g}{\draw[-{Stealth}](\x)--(\y);}
+\draw[-{Stealth}](e)--(h);\draw[-{Stealth}](h)-|(f);\end{tikzpicture}}

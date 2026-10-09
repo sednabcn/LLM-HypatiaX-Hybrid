@@ -1,0 +1,786 @@
+
+name: "HypatiaX - runner (hybrid)"
+run-name: "HypatiaX - runner (hybrid) · ${{ inputs.experiment }}"
+
+# Mirrors ci_runner_repro.yml's shape (dispatch_multi -> plan -> worker,
+# same checkpoint-cache/shard/commit-and-push conventions) but drives the
+# 7 hybrid_exp* steps in run_hybrid_all.sh's _STEP_ORDER against
+# run_comparative_hybrid_methods.py, instead of run_all.sh's exp1/exp2/...
+# steps. Methods-per-step and the "assumed*" PCA caveat are copied
+# verbatim from run_hybrid_all.sh's own header comment -- see that file
+# and experiment_protocol_hybrid.py's VARIANT_MANIFEST for the underlying
+# capability gate this matrix must not contradict.
+
+on:
+  workflow_dispatch:
+    inputs:
+
+      experiment:
+        description: "Hybrid experiment step (see run_hybrid_all.sh --step)"
+        required: true
+        type: choice
+        options:
+          - hybrid_exp1
+          - hybrid_exp1_pca
+          - hybrid_exp1b
+          - hybrid_exp1b_pca
+          - hybrid_exp2
+          - hybrid_exp3
+          - hybrid_exp3b
+        default: hybrid_exp1
+
+      experiments:
+        description: "Optional: space/comma-separated step IDs to run as separate dispatches, e.g. 'hybrid_exp1 hybrid_exp2 hybrid_exp3'. Overrides 'experiment' above when set -- this run becomes a fan-out dispatcher only, one independent run per ID, all other inputs passed through unchanged."
+        required: false
+        default: ""
+
+      n_shards:
+        description: "Number of parallel worker shards (user input). hybrid_exp1b/hybrid_exp1b_pca: forced to 5 (one shard per seed, matching exp1b's table minimum in ci_runner_repro.yml -- portfolio_seedNN task IDs). hybrid_exp3b: floored to 4 (mirrors exp3b's table minimum). All other steps: forced to 1. Input is accepted and logged but may be overridden by the per-step shard table below."
+        required: false
+        default: "1"
+
+      seeds:
+        description: "Comma-separated seed list passed to --seeds (e.g. 42,99,123,777,2024) -- overrides per-step default"
+        required: false
+        default: ""
+
+      sample_cases:
+        description: "Smoke-scale knob -> --sample-cases (run_hybrid_all.sh's HYBRID_SAMPLE_CASES). Blank = full scale."
+        required: false
+        default: ""
+
+      pysr_generations:
+        description: "PySR generations (PYSR_GENERATIONS)"
+        required: false
+        default: "10000"
+
+      pysr_populations:
+        description: "PySR parallel populations (PYSR_POPULATIONS)"
+        required: false
+        default: "30"
+
+      task_ids_override:
+        description: "Space-separated task IDs to run (blank = full step's task set)"
+        required: false
+        default: ""
+
+      resume:
+        description: "Resume from checkpoint -- skip task IDs already recorded as done (true/false)"
+        required: false
+        default: "true"
+
+      dry_run:
+        description: "Dry-run -- print commands without executing (true/false)"
+        required: false
+        default: "false"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.inputs.experiment }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  actions:  write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  JOB_DEADLINE:         "19800"
+  PYSR_GENERATIONS:     "${{ github.event.inputs.pysr_generations || '10000' }}"
+  PYSR_SEED:            "42"
+  PYSR_POPULATIONS:     "${{ github.event.inputs.pysr_populations || '30' }}"
+  METHOD_TIMEOUT:       "900"    # run_hybrid_all.sh default -- PySR-backed methods (5/6/9).
+                                  # Method 8 (V4Selector/Variant 6) also gets this longer budget
+                                  # even though its candidate pool (llm/nn/residual_nn/blend/
+                                  # linear_fallback) never calls PySR -- kept here deliberately
+                                  # for timeout headroom, not because it's PySR-backed (see
+                                  # Hybrid-pipeline.txt finding #3).
+  LLM_METHOD_TIMEOUT:   "120"    # run_hybrid_all.sh default -- LLM/NN-only methods (1-4/7), no PySR
+  PYSR_FIT_WALL_TIMEOUT: "1200"
+  PYSR_FIT_GRACE_SECS:  "120"
+  PYTHON_JULIACALL_HANDLE_SIGNALS: "yes"
+  JULIA_NUM_THREADS:    "4"
+  OUT_BASE:             "hypatiax/data/results"
+  EXPERIMENTS_DIR:      "${{ github.workspace }}/hypatiax/experiments/benchmarks"
+  REPRO_CFG:            "${{ github.workspace }}/config/repro.yaml"
+
+jobs:
+
+  dispatch_multi:
+    name: "Dispatch multi - fan out '${{ github.event.inputs.experiments }}'"
+    if: github.event.inputs.experiments != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Fan out one isolated dispatch per hybrid step
+        env:
+          GH_TOKEN:          ${{ secrets.DISPATCH_PAT }}
+          REPO:               ${{ github.repository }}
+          REF:                ${{ github.ref_name }}
+          EXPERIMENTS:        ${{ github.event.inputs.experiments }}
+          N_SHARDS:           ${{ github.event.inputs.n_shards }}
+          SEEDS:              ${{ github.event.inputs.seeds }}
+          SAMPLE_CASES:       ${{ github.event.inputs.sample_cases }}
+          PYSR_GENERATIONS:   ${{ github.event.inputs.pysr_generations }}
+          PYSR_POPULATIONS:   ${{ github.event.inputs.pysr_populations }}
+          TASK_IDS_OVERRIDE:  ${{ github.event.inputs.task_ids_override }}
+          RESUME:             ${{ github.event.inputs.resume }}
+          DRY_RUN:            ${{ github.event.inputs.dry_run }}
+        run: |
+          set -euo pipefail
+
+          # Same ordering as run_hybrid_all.sh's _STEP_ORDER.
+          VALID_IDS="hybrid_exp1 hybrid_exp1_pca hybrid_exp1b hybrid_exp1b_pca hybrid_exp2 hybrid_exp3 hybrid_exp3b"
+
+          IDS=$(echo "$EXPERIMENTS" | tr ',' ' ' | tr -s ' ' | sed 's/^ *//;s/ *$//')
+
+          if [[ -z "$IDS" ]]; then
+            echo "::error::'experiments' was non-empty but contained no parseable IDs after splitting on ',' and ' '."
+            exit 1
+          fi
+
+          UNKNOWN=""
+          for ID in $IDS; do
+            case " $VALID_IDS " in
+              *" $ID "*) ;;
+              *) UNKNOWN="$UNKNOWN $ID" ;;
+            esac
+          done
+          if [[ -n "$UNKNOWN" ]]; then
+            echo "::error::Unknown hybrid step ID(s) in 'experiments':$UNKNOWN — must be one of: $VALID_IDS"
+            exit 1
+          fi
+
+          echo "::notice::Fanning out ${IDS} as isolated dispatches on ref ${REF}."
+          for ID in $IDS; do
+            echo "::notice::Dispatching isolated run for experiment=${ID}"
+            gh workflow run "ci_runner_hybrid.yml" \
+              --repo "$REPO" \
+              --ref "$REF" \
+              -f experiment="$ID" \
+              -f n_shards="$N_SHARDS" \
+              -f seeds="$SEEDS" \
+              -f sample_cases="$SAMPLE_CASES" \
+              -f pysr_generations="$PYSR_GENERATIONS" \
+              -f pysr_populations="$PYSR_POPULATIONS" \
+              -f task_ids_override="$TASK_IDS_OVERRIDE" \
+              -f resume="$RESUME" \
+              -f dry_run="$DRY_RUN"
+          done
+
+  plan:
+    name: "Plan - ${{ github.event.inputs.experiment }}"
+    if: github.event.inputs.experiments == ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    outputs:
+      shard_matrix:  ${{ steps.split.outputs.shard_matrix }}
+      all_pending:   ${{ steps.split.outputs.all_pending }}
+      n_shards:      ${{ steps.split.outputs.n_shards }}
+      step_id:       ${{ steps.meta.outputs.step_id }}
+      protocol:      ${{ steps.meta.outputs.protocol }}
+      pca_flag:      ${{ steps.meta.outputs.pca_flag }}
+      methods:       ${{ steps.meta.outputs.methods }}
+      result_subdir: ${{ steps.meta.outputs.result_subdir }}
+      effective_seeds: ${{ steps.meta.outputs.effective_seeds }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4.2.2
+        with:
+          fetch-depth: 1
+
+      - name: Restore shared checkpoint (plan)
+        id: restore_plan
+        uses: actions/cache/restore@v4.2.3
+        with:
+          path: checkpoint_plan.json
+          key:  checkpoint-plan-${{ github.event.inputs.experiment }}-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            checkpoint-plan-${{ github.event.inputs.experiment }}-${{ github.ref_name }}-
+
+      - name: Emit hybrid-step metadata
+        id: meta
+        run: |
+          STEP="${{ github.event.inputs.experiment }}"
+          SEEDS_IN="${{ github.event.inputs.seeds }}"
+
+          # protocol / --pca / methods list mirror run_hybrid_all.sh's own
+          # per-step invocation of run_comparative_hybrid_methods.py
+          # exactly (see that file's hybrid_exp1..hybrid_exp3b blocks).
+          # hybrid_exp1_pca / hybrid_exp1b_pca are flagged "assumed*" there
+          # (decision #3: pca.py treated as a pure fork of the non-pca
+          # backend, not yet byte-verified) -- carried through unchanged.
+          case "$STEP" in
+
+            hybrid_exp1)
+              PROTOCOL="defi"; PCA_FLAG=""; METHODS="1 2 3 4 5 6 7 8"
+              RESULT_SUBDIR="hybrid_comparison/exp1"
+              DEFAULT_SEEDS="42"
+              ;;
+
+            hybrid_exp1_pca)
+              PROTOCOL="defi"; PCA_FLAG="--pca"; METHODS="1 2 3 4 5 6 7 8"
+              RESULT_SUBDIR="hybrid_comparison/exp1_pca"
+              DEFAULT_SEEDS="42"
+              ;;
+
+            hybrid_exp1b)
+              PROTOCOL="defi"; PCA_FLAG=""; METHODS="1 2 3 4 5 6 7 8"
+              RESULT_SUBDIR="hybrid_comparison/exp1b"
+              DEFAULT_SEEDS="${SEEDS_IN:-42,99,123,777,2024}"
+              ;;
+
+            hybrid_exp1b_pca)
+              PROTOCOL="defi"; PCA_FLAG="--pca"; METHODS="1 2 3 4 5 6 7 8"
+              RESULT_SUBDIR="hybrid_comparison/exp1b_pca"
+              DEFAULT_SEEDS="${SEEDS_IN:-42,99,123,777,2024}"
+              ;;
+
+            hybrid_exp2)
+              PROTOCOL="feynman"; PCA_FLAG=""; METHODS="1 2 3 4 5 6 7"
+              RESULT_SUBDIR="hybrid_comparison/exp2"
+              DEFAULT_SEEDS="42"
+              ;;
+
+            hybrid_exp3)
+              PROTOCOL="nguyen12"; PCA_FLAG=""; METHODS="9"
+              RESULT_SUBDIR="hybrid_comparison/exp3"
+              DEFAULT_SEEDS="42"
+              ;;
+
+            hybrid_exp3b)
+              PROTOCOL="nguyen12"; PCA_FLAG=""; METHODS="9"
+              RESULT_SUBDIR="hybrid_comparison/exp3b"
+              DEFAULT_SEEDS="${SEEDS_IN:-99,123,777,2024}"
+              ;;
+
+            *)
+              echo "ERROR: unknown hybrid step '$STEP'"; exit 1 ;;
+          esac
+
+          EFFECTIVE_SEEDS="${SEEDS_IN:-$DEFAULT_SEEDS}"
+
+          echo "step_id=$STEP"                    >> "$GITHUB_OUTPUT"
+          echo "protocol=$PROTOCOL"                >> "$GITHUB_OUTPUT"
+          echo "pca_flag=$PCA_FLAG"                >> "$GITHUB_OUTPUT"
+          echo "methods=$METHODS"                  >> "$GITHUB_OUTPUT"
+          echo "result_subdir=$RESULT_SUBDIR"      >> "$GITHUB_OUTPUT"
+          echo "effective_seeds=$EFFECTIVE_SEEDS"  >> "$GITHUB_OUTPUT"
+
+      - name: Compute pending task list and shard split
+        id: split
+        env:
+          N_SHARDS:        "${{ github.event.inputs.n_shards || '1' }}"
+          OVERRIDE:        "${{ github.event.inputs.task_ids_override }}"
+          EFFECTIVE_SEEDS: ${{ steps.meta.outputs.effective_seeds }}
+          STEP:            ${{ steps.meta.outputs.step_id }}
+        run: |
+          python3 - <<'PYEOF'
+          import json, os, sys
+
+          STEP         = os.environ["STEP"]
+          N_SHARDS_RAW = int(os.environ["N_SHARDS"])
+
+          # Shard-count table: hybrid_exp1b/hybrid_exp1b_pca shard by seed
+          # (one shard per portfolio_seedNN task ID, same convention as
+          # ci_runner_repro.yml's exp1b=5); hybrid_exp3b floors to 4
+          # (mirrors exp3b's table minimum there). Everything else is
+          # single-shard, matching run_hybrid_all.sh's own --step
+          # semantics (each step is one orchestrator invocation).
+          STEP_SHARD_TABLE = {
+              "hybrid_exp1":      1,
+              "hybrid_exp1_pca":  1,
+              "hybrid_exp1b":     5,
+              "hybrid_exp1b_pca": 5,
+              "hybrid_exp2":      1,
+              "hybrid_exp3":      1,
+              "hybrid_exp3b":     4,
+          }
+          N_SHARDS_DEFAULT = STEP_SHARD_TABLE.get(STEP, 1)
+          if N_SHARDS_DEFAULT == 1:
+              N_SHARDS = 1
+              if N_SHARDS_RAW not in (1,):
+                  print(f"::warning::n_shards={N_SHARDS_RAW} dispatch input IGNORED for '{STEP}' "
+                        f"— this step is single-shard only (table=1). Using N_SHARDS=1.")
+          else:
+              N_SHARDS = max(N_SHARDS_DEFAULT, min(N_SHARDS_DEFAULT, N_SHARDS_RAW)) if N_SHARDS_RAW >= N_SHARDS_DEFAULT else N_SHARDS_DEFAULT
+              if N_SHARDS != N_SHARDS_RAW:
+                  print(f"::notice::n_shards: input={N_SHARDS_RAW} table={N_SHARDS_DEFAULT} "
+                        f"using={N_SHARDS} (table default enforced as minimum)")
+
+          OVERRIDE = os.environ["OVERRIDE"].split() if os.environ["OVERRIDE"].strip() else []
+          SEEDS    = [s.strip() for s in os.environ["EFFECTIVE_SEEDS"].split(",") if s.strip()]
+
+          # Task-ID registry. hybrid_exp1/hybrid_exp1_pca/hybrid_exp2 run
+          # as a single combined-output task ("all"); hybrid_exp1b/1b_pca
+          # shard by portfolio_seedNN (consumed by run_hybrid_all.sh's own
+          # SHARD_IDS/TASK_IDS -> _SHARD_SEEDS grep); hybrid_exp3/exp3b use
+          # numeric seed task IDs the same way.
+          if STEP in ("hybrid_exp1", "hybrid_exp1_pca", "hybrid_exp2"):
+              registry_ids = ["all"]
+          elif STEP in ("hybrid_exp1b", "hybrid_exp1b_pca"):
+              registry_ids = [f"portfolio_seed{s}" for s in SEEDS]
+          elif STEP in ("hybrid_exp3", "hybrid_exp3b"):
+              registry_ids = list(SEEDS)
+          else:
+              registry_ids = ["all"]
+
+          all_ids = OVERRIDE if OVERRIDE else registry_ids
+          if not all_ids:
+              print(f"ERROR: no task IDs for step '{STEP}'", file=sys.stderr)
+              sys.exit(1)
+
+          done = set()
+          ckpt_path = "checkpoint_plan.json"
+          if os.path.exists(ckpt_path):
+              try:
+                  with open(ckpt_path) as f:
+                      done = set(json.load(f).get("completed", []))
+                  print(f"Checkpoint: {len(done)} already completed")
+              except Exception as e:
+                  print(f"Warning: could not read checkpoint: {e}")
+
+          pending = [t for t in all_ids if t not in done]
+          print(f"Total={len(all_ids)}  Done={len(done)}  Pending={len(pending)}")
+
+          if not pending:
+              print("Nothing pending - all tasks already complete.")
+              with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+                  fh.write("shard_matrix=[]\n")
+                  fh.write("all_pending=[]\n")
+              sys.exit(0)
+
+          def _block_shards(all_ids, n_shards):
+              N = len(all_ids)
+              chunk, r = divmod(N, n_shards)
+              shards, start = [], 0
+              for j in range(n_shards):
+                  size = chunk + (1 if j < r else 0)
+                  shards.append(all_ids[start : start + size])
+                  start += size
+              return shards
+
+          pending_set        = set(pending)
+          raw_shards_all      = _block_shards(all_ids, N_SHARDS)
+          raw_shards          = [[t for t in s if t in pending_set] for s in raw_shards_all]
+          raw_shards_indexed  = [(orig_j, s) for orig_j, s in enumerate(raw_shards) if s]
+
+          matrix = [
+              {"shard": orig_j, "shard_id": orig_j + 1, "ids": json.dumps(s)}
+              for orig_j, s in raw_shards_indexed
+          ]
+          N_SHARDS = len(matrix)
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+              fh.write(f"shard_matrix={json.dumps(matrix)}\n")
+              fh.write(f"all_pending={json.dumps(pending)}\n")
+              fh.write(f"n_shards={N_SHARDS}\n")
+
+          print("Shard assignment (block-partition):")
+          for s in matrix:
+              ids = json.loads(s["ids"])
+              print(f"  shard {s['shard']}: {len(ids)} tasks | IDs: {ids[:3]}{'...' if len(ids)>3 else ''}")
+          PYEOF
+
+      - name: Save plan checkpoint cache
+        if: always()
+        uses: actions/cache/save@v4.2.3
+        with:
+          path: checkpoint_plan.json
+          key: checkpoint-plan-${{ github.event.inputs.experiment }}-${{ github.ref_name }}-${{ github.run_id }}
+
+
+  worker:
+    name: "Worker - ${{ github.event.inputs.experiment }} shard ${{ matrix.shard }}"
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.plan.outputs.shard_matrix) }}
+
+    if: ${{ github.event.inputs.experiments == '' && needs.plan.outputs.shard_matrix != '[]' && needs.plan.outputs.shard_matrix != '' }}
+
+    env:
+      STEP:           ${{ needs.plan.outputs.step_id }}
+      PROTOCOL:       ${{ needs.plan.outputs.protocol }}
+      PCA_FLAG:       ${{ needs.plan.outputs.pca_flag }}
+      METHODS:        ${{ needs.plan.outputs.methods }}
+      RESULT_SUBDIR:  ${{ needs.plan.outputs.result_subdir }}
+      SHARD_IDS:      ${{ matrix.ids }}
+      TASK_IDS:       ${{ matrix.ids }}
+      SHARD_INDEX:    ${{ matrix.shard }}
+      SHARD_ID:       ${{ matrix.shard_id }}
+      EFFECTIVE_SEEDS: ${{ needs.plan.outputs.effective_seeds }}
+      N_SHARDS:       ${{ needs.plan.outputs.n_shards }}
+      HYBRID_SAMPLE_CASES: "${{ github.event.inputs.sample_cases }}"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4.2.2
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Set up Julia 1.11
+        uses: julia-actions/setup-julia@v2.6.1
+        with:
+          version: "1.11"
+
+      - name: Cache Julia depot
+        uses: actions/cache@v4
+        with:
+          path: ~/.julia
+          key: julia-depot-${{ runner.os }}-${{ hashFiles('**/Project.toml', '**/Manifest.toml') }}
+          restore-keys: |
+            julia-depot-${{ runner.os }}-
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install "pandas==2.2.3"
+          pip install "pysr==2.0.0a1" \
+            numpy scipy sympy \
+            anthropic \
+            scikit-learn \
+            pyyaml \
+            python-dotenv \
+            matplotlib \
+            seaborn \
+            pmlb \
+            pint \
+            psutil
+
+      - name: Install Julia / SymbolicRegression
+        run: |
+          python3 -c "import pysr; pysr.install()"
+
+      - name: Precompile Julia / SymbolicRegression
+        run: |
+          python3 - <<'PYEOF'
+          import subprocess, sys
+
+          warmup = """
+          import numpy as np
+          import pysr
+          X = np.random.randn(20, 1)
+          y = X[:, 0] * 2.0 + 1.0
+          model = pysr.PySRRegressor(
+              niterations=5,
+              populations=1,
+              verbosity=0,
+              progress=False,
+              tempdir="/tmp/pysr_warmup",
+          )
+          model.fit(X, y)
+          print("Julia/PySR precompile warmup OK")
+          """
+          result = subprocess.run(
+              [sys.executable, "-c", warmup],
+              timeout=300,
+              capture_output=True,
+              text=True,
+          )
+          print(result.stdout or "")
+          if result.returncode != 0:
+              print("WARNING: Julia precompile warmup failed (PySR-backed methods 5/6/9 may be N/A; "
+                    "method 8 doesn't use PySR and is unaffected):")
+              print(result.stderr[-3000:] if result.stderr else "(no stderr)")
+          PYEOF
+
+      - name: Restore shard checkpoint
+        id: restore_worker
+        uses: actions/cache/restore@v4.2.3
+        with:
+          path: checkpoint_worker_shard${{ matrix.shard }}.json
+          key:  checkpoint-worker-${{ github.event.inputs.experiment }}-shard${{ matrix.shard }}-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            checkpoint-worker-${{ github.event.inputs.experiment }}-shard${{ matrix.shard }}-${{ github.ref_name }}-
+
+      - name: Environment check
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          echo "Python: $(python3 --version)"
+          python3 -c "import pysr;      print('PySR:        ', pysr.__version__)"
+          python3 -c "import torch;     print('PyTorch:     ', torch.__version__)"
+          python3 -c "import anthropic; print('anthropic SDK: ok')"
+          python3 -c "import sympy;     print('SymPy:       ', sympy.__version__)"
+          python3 -c "import scipy;     print('SciPy:       ', scipy.__version__)"
+          python3 -c "import sklearn;   print('scikit-learn:', sklearn.__version__)"
+          [[ -n "${ANTHROPIC_API_KEY:-}" ]] || { echo "ERROR: ANTHROPIC_API_KEY not set"; exit 1; }
+          echo "ANTHROPIC_API_KEY: set (${#ANTHROPIC_API_KEY} chars)"
+          echo "STEP:          ${STEP}"
+          echo "PROTOCOL:      ${PROTOCOL}  PCA_FLAG:${PCA_FLAG:-<none>}"
+          echo "METHODS:       ${METHODS}"
+          echo "RESULT_SUBDIR: ${RESULT_SUBDIR}"
+          echo "JULIA_NUM_THREADS: ${JULIA_NUM_THREADS}"
+
+      - name: Create results directory structure
+        run: |
+          mkdir -p \
+            "${OUT_BASE}/hybrid_comparison/exp1" \
+            "${OUT_BASE}/hybrid_comparison/exp1_pca" \
+            "${OUT_BASE}/hybrid_comparison/exp1b" \
+            "${OUT_BASE}/hybrid_comparison/exp1b_pca" \
+            "${OUT_BASE}/hybrid_comparison/exp2" \
+            "${OUT_BASE}/hybrid_comparison/exp3" \
+            "${OUT_BASE}/hybrid_comparison/exp3b" \
+            "${{ github.workspace }}/logs"
+
+      - name: Seed shard checkpoint from committed results (cache miss only)
+        if: steps.restore_worker.outputs.cache-hit != 'true'
+        env:
+          SHARD_IDS_JSON: ${{ matrix.ids }}
+        run: |
+          CKPT_PATH="checkpoint_worker_shard${{ matrix.shard }}.json"
+          COMMITTED="${OUT_BASE}/${RESULT_SUBDIR}/${STEP}_checkpoint.json"
+          if [ -f "$COMMITTED" ]; then
+            jq --argjson keys "$SHARD_IDS_JSON" \
+              'with_entries(select(.key as $k | ($keys | index($k)) != null))' \
+              "$COMMITTED" > "$CKPT_PATH" 2>/dev/null || echo '{"completed":[]}' > "$CKPT_PATH"
+            N=$(python3 -c "import json; d=json.load(open('$CKPT_PATH')); print(len(d.get('completed', d)))" 2>/dev/null || echo "?")
+            echo "Seeded shard ${{ matrix.shard }} checkpoint (${N} tasks) from committed master"
+          else
+            echo '{"completed":[]}' > "$CKPT_PATH"
+            echo "No committed checkpoint found - shard ${{ matrix.shard }} starts fresh"
+          fi
+
+      - name: Resolve this shard's pending IDs
+        id: resolve_ids
+        run: |
+          python3 - <<'PYEOF'
+          import json, os
+
+          shard_ids = json.loads(os.environ.get("SHARD_IDS") or "[]")
+          ckpt_path = f"checkpoint_worker_shard{os.environ['SHARD_INDEX']}.json"
+
+          done = set()
+          if os.path.exists(ckpt_path):
+              try:
+                  with open(ckpt_path) as f:
+                      done = set(json.load(f).get("completed", []))
+              except Exception as e:
+                  print(f"Warning: could not read shard checkpoint: {e}")
+
+          pending = [t for t in shard_ids if t not in done]
+          print(f"Shard {os.environ['SHARD_INDEX']}: {len(shard_ids)} assigned, "
+                f"{len(done)} done, {len(pending)} pending")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+              fh.write(f"pending_ids={json.dumps(pending)}\n")
+              fh.write(f"has_work={'true' if pending else 'false'}\n")
+          PYEOF
+
+      - name: Run hybrid experiment step
+        if: ${{ steps.resolve_ids.outputs.has_work == 'true' }}
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GITHUB_TOKEN:      ${{ secrets.GITHUB_TOKEN }}
+          PENDING_IDS:       ${{ steps.resolve_ids.outputs.pending_ids }}
+          RESULTS_DIR:       ${{ github.workspace }}/${{ env.OUT_BASE }}
+          REPO_ROOT:         ${{ github.workspace }}
+          RESUME:            ${{ github.event.inputs.resume || 'true' }}
+          DRY_RUN:           ${{ github.event.inputs.dry_run || 'false' }}
+        run: |
+          set -euo pipefail
+
+          export ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY}"
+          [[ -n "${ANTHROPIC_API_KEY}" ]] || { echo "ERROR: ANTHROPIC_API_KEY secret is empty"; exit 1; }
+          echo "ANTHROPIC_API_KEY: enforced (${#ANTHROPIC_API_KEY} chars)"
+
+          mkdir -p "${RESULTS_DIR}/${RESULT_SUBDIR}"
+
+          # hybrid_exp1b/hybrid_exp1b_pca and hybrid_exp3/hybrid_exp3b pass
+          # their per-shard seed set to run_hybrid_all.sh via SHARD_IDS/
+          # TASK_IDS, exactly as that script's own portfolio_seedNN /
+          # numeric-seed grep expects. hybrid_exp1/hybrid_exp1_pca/
+          # hybrid_exp2 run as one combined task ("all") -- nothing to
+          # translate.
+          echo "=== Shard ${SHARD_INDEX} | Step: ${STEP} ==="
+          echo "PENDING_IDS=${PENDING_IDS}"
+
+          if [[ "${DRY_RUN}" == "true" ]]; then
+            echo "=== DRY RUN - shard ${SHARD_INDEX} | step: ${STEP} ==="
+            echo "${PENDING_IDS}" | python3 -c "import json,sys; [print(' ',t) for t in json.load(sys.stdin)]"
+            echo "PROTOCOL=${PROTOCOL}  PCA_FLAG=${PCA_FLAG:-<none>}  METHODS=${METHODS}"
+            echo "PYSR_POPULATIONS=${PYSR_POPULATIONS}  PYSR_GENERATIONS=${PYSR_GENERATIONS}"
+            echo "HYBRID_SAMPLE_CASES=${HYBRID_SAMPLE_CASES:-<full scale>}  RESUME=${RESUME}"
+            SHARD_IDS="${SHARD_IDS}" TASK_IDS="${TASK_IDS}" \
+              RESULTS_DIR="${RESULTS_DIR}" REPO_ROOT="${REPO_ROOT}" \
+              bash run_hybrid_all.sh --step "${STEP}" --dry-run
+            exit 0
+          fi
+
+          SHARD_IDS="${SHARD_IDS}" \
+          TASK_IDS="${TASK_IDS}" \
+          RESULTS_DIR="${RESULTS_DIR}" \
+          EXPERIMENTS_DIR="${EXPERIMENTS_DIR}" \
+          REPO_ROOT="${REPO_ROOT}" \
+            bash run_hybrid_all.sh --step "${STEP}"
+
+      - name: Verify hybrid step output files exist
+        if: ${{ steps.resolve_ids.outputs.has_work == 'true' }}
+        run: |
+          set -euo pipefail
+          TARGET="${{ github.workspace }}/${OUT_BASE}/${RESULT_SUBDIR}"
+          COUNT=$(find "${TARGET}" -maxdepth 1 -name "*.json" 2>/dev/null | wc -l)
+          echo "=== ${STEP} output verification ==="
+          echo "  Target dir : ${TARGET}"
+          echo "  JSON count : ${COUNT}"
+          find "${TARGET}" -type f 2>/dev/null | sort || true
+          if [[ "${COUNT}" -eq 0 ]]; then
+            echo "::error::${STEP} produced NO output files in '${TARGET}'."
+            echo "  Check the '${STEP}_run.log' produced by run_hybrid_all.sh in the same dir,"
+            echo "  and the 'Run hybrid experiment step' log above."
+            exit 1
+          fi
+          echo "  OK ${STEP} output files present."
+
+      - name: Save shard checkpoint
+        if: always()
+        run: |
+          python3 - <<'PYEOF'
+          import json, os, glob
+
+          ckpt_path  = f"checkpoint_worker_shard{os.environ['SHARD_INDEX']}.json"
+          result_dir = os.path.join(os.environ["OUT_BASE"], os.environ["RESULT_SUBDIR"])
+          shard_ids  = json.loads(os.environ["SHARD_IDS"])
+
+          completed = []
+          if os.path.exists(ckpt_path):
+              try:
+                  with open(ckpt_path) as f:
+                      completed = json.load(f).get("completed", [])
+              except Exception:
+                  pass
+          done_set = set(completed)
+
+          # All hybrid_exp* steps write combined per-step output (a single
+          # run_hybrid_all.sh invocation per shard), so presence of any
+          # fresh JSON in result_dir marks every ID in this shard done --
+          # same convention ci_runner_repro.yml uses for its
+          # COMBINED_OUTPUT_EXPS (exp1/exp1b/exp1c/suppB/suppB_sc).
+          hits = glob.glob(os.path.join(result_dir, "*.json"))
+          if hits:
+              done_set.update(shard_ids)
+              print(f"[{os.environ.get('STEP','')}] Combined result file(s) detected "
+                    f"({len(hits)}) — marking all {len(shard_ids)} shard task(s) done.")
+          else:
+              print(f"[{os.environ.get('STEP','')}] WARNING: no result JSON found in "
+                    f"{result_dir} — 0 tasks marked done.")
+
+          with open(ckpt_path, "w") as f:
+              json.dump({"completed": sorted(done_set)}, f, indent=2)
+
+          print(f"Checkpoint saved: {len(done_set)} completed tasks in shard {os.environ['SHARD_INDEX']}")
+          PYEOF
+
+      - name: Persist shard checkpoint to cache
+        if: always()
+        uses: actions/cache/save@v4.2.3
+        with:
+          path: checkpoint_worker_shard${{ matrix.shard }}.json
+          key: checkpoint-worker-${{ github.event.inputs.experiment }}-shard${{ matrix.shard }}-${{ github.ref_name }}-${{ github.run_id }}
+
+      - name: Upload shard results artifact
+        if: always()
+        uses: actions/upload-artifact@v4.3.6
+        with:
+          name: results-${{ github.event.inputs.experiment }}-shard${{ matrix.shard }}
+          path: ${{ env.OUT_BASE }}/${{ needs.plan.outputs.result_subdir }}/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Commit and push shard results to repo
+        if: always()
+        run: |
+          set -euo pipefail
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          TARGET="${{ github.workspace }}/${OUT_BASE}/${RESULT_SUBDIR}"
+          FILE_COUNT=$(find "${TARGET}" -type f 2>/dev/null | wc -l || echo 0)
+          echo "Files in ${TARGET}: ${FILE_COUNT}"
+          if [[ "${FILE_COUNT}" -eq 0 ]]; then
+            echo "No files in ${TARGET} — skipping commit for shard ${SHARD_INDEX}."
+            exit 0
+          fi
+
+          commit_and_push() {
+            if ! git pull --rebase --autostash origin "${{ github.ref_name }}" 2>&1; then
+              echo "::warning::git pull --rebase failed — stashing untracked files and retrying"
+              git stash --include-untracked --quiet || true
+              git pull --rebase --autostash origin "${{ github.ref_name }}" 2>&1 || true
+              git stash pop --quiet 2>/dev/null || true
+            fi
+
+            git add -f "${TARGET}"
+
+            AHEAD=0
+            if git rev-parse --abbrev-ref --symbolic-full-name '@{u}' >/dev/null 2>&1; then
+              AHEAD=$(git rev-list --count '@{u}..HEAD' 2>/dev/null || echo 0)
+            fi
+
+            if git diff --cached --quiet && [[ "${AHEAD}" -eq 0 ]]; then
+              echo "Shard ${SHARD_INDEX}: nothing to commit or push."
+              return 0
+            fi
+
+            if ! git diff --cached --quiet; then
+              STAGED=$(git diff --cached --name-only | wc -l)
+              git commit -m "ci: ${STEP} shard${SHARD_INDEX} results (${STAGED} file(s)) — run ${{ github.run_id }} — $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            else
+              STAGED=0
+            fi
+
+            if ! git push --force-with-lease origin "${{ github.ref_name }}"; then
+              echo "::warning::git push failed for shard ${SHARD_INDEX} (${STEP}) — commit is local-only so far."
+              return 1
+            fi
+            echo "Pushed shard ${SHARD_INDEX}: ${STAGED} file(s) newly committed (HEAD $(git rev-parse --short HEAD)) → ${{ github.ref_name }}"
+          }
+
+          MAX_ATTEMPTS=5
+          ATTEMPT=1
+          until commit_and_push; do
+            if [[ "${ATTEMPT}" -ge "${MAX_ATTEMPTS}" ]]; then
+              echo "::error::commit_and_push failed for shard ${SHARD_INDEX} (${STEP}) after ${MAX_ATTEMPTS} attempts — giving up."
+              exit 1
+            fi
+            ATTEMPT=$((ATTEMPT + 1))
+            SLEEP_SECS=$(( (RANDOM % 15) + 5 * ATTEMPT ))
+            echo "Push conflict (attempt ${ATTEMPT}/${MAX_ATTEMPTS}) — waiting ${SLEEP_SECS}s then retrying ..."
+            sleep "${SLEEP_SECS}"
+          done
+
+      - name: Verify results committed to repo
+        if: always()
+        run: |
+          set -euo pipefail
+          TARGET="${{ github.workspace }}/${OUT_BASE}/${RESULT_SUBDIR}"
+          REL_TARGET="${OUT_BASE}/${RESULT_SUBDIR}"
+          TRACKED=$(git ls-files --full-name "${REL_TARGET}" 2>/dev/null | wc -l || echo 0)
+          ON_DISK=$(find "${TARGET}" -type f 2>/dev/null | wc -l || echo 0)
+
+          echo "=== Repo commit verification: shard ${SHARD_INDEX} | ${STEP} ==="
+          echo "  Path       : ${TARGET}"
+          echo "  Git-tracked: ${TRACKED} file(s)"
+          echo "  On disk    : ${ON_DISK} file(s)"
+          git ls-files --full-name "${REL_TARGET}" 2>/dev/null | sort || true
+
+          if [[ "${TRACKED}" -eq 0 ]]; then
+            echo "::error::shard ${SHARD_INDEX} (${STEP}): NO files are git-tracked under '${TARGET}'."
+            exit 1
+          fi
+          echo "  OK ${TRACKED} file(s) committed and visible in repo under ${TARGET}."

@@ -1,0 +1,30 @@
+% Build:  make -C .. paper-dryrun   (synthetic data, watermarked)   |   make -C .. paper   (real data only)
+% JMLR style: place jmlr2e.sty (from jmlr.org/format) next to this file; otherwise an article fallback is used.
+\documentclass[11pt]{article}
+\IfFileExists{jmlr2e.sty}{\usepackage{jmlr2e}}{\usepackage[margin=1in]{geometry}\newcommand{\editor}[1]{}}
+\usepackage[utf8]{inputenc}\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb,booktabs,graphicx,array,xcolor,fancyhdr,url,hyperref,adjustbox}
+\usepackage[numbers,sort&compress]{natbib}
+\usepackage{tikz}\usetikzlibrary{shapes.geometric,arrows.meta,positioning,fit}
+\input{fc_styles}
+\input{gen_paths}                       % \tabdir \figdir \datastatus  (written by build.py)
+\newcommand{\dryrunTag}{DRYRUN}
+\newcommand{\safeinput}[1]{\IfFileExists{#1.tex}{\input{#1}}{\emph{(not generated: #1)}}}
+\newcommand{\rtab}[1]{\begin{adjustbox}{max width=\linewidth}\safeinput{\tabdir/#1}\end{adjustbox}}
+\newcommand{\rfig}[2][0.9]{\IfFileExists{\figdir/#2.pdf}{\includegraphics[width=#1\linewidth]{\figdir/#2.pdf}}{\emph{(missing figure #2)}}}
+\newcommand{\R}{R^2}\newcommand{\rfar}{R^2_{\mathrm{far}}}\newcommand{\HX}{HypatiaX}
+\pagestyle{fancy}\fancyhf{}\fancyfoot[C]{\thepage}
+\ifx\datastatus\dryrunTag\fancyhead[C]{\textcolor{red}{\bfseries DRY-RUN BUILD --- SYNTHETIC DATA --- NOT SCIENTIFIC RESULTS}}\fi
+\title{Which Hybrid? A Seven-Variant Comparison of LLM-Guided Symbolic Regression\\for Extrapolation-Reliable Discovery}
+\author{Anonymous (draft)}
+\date{\today}
+\begin{document}\maketitle
+\ifx\datastatus\dryrunTag\begin{center}\fbox{\parbox{0.9\linewidth}{\color{red}\textbf{Dry-run build.} Every number, table and figure derived from experiments in this PDF comes from a random generator used to test the pipeline. Nothing here is a finding.}}\end{center}\fi
+\begin{abstract}
+Hybrid methods that combine a large-language-model (LLM) symbolic prior with neural or evolutionary regressors are usually judged on in-distribution fit, which hides catastrophic extrapolation failures. We compare seven hybrid variants and three baselines under a single protocol that reports far-extrapolation $R^2$, win rate with bootstrap confidence intervals, and per-domain extrapolation behaviour, and we audit each variant for the implementation defects that most threaten such comparisons (silent no-op LLM paths, test-set leakage, version drift). \emph{Results are pending the full experiment run; this abstract will be completed from the final tables.}
+\end{abstract}
+\input{sections/intro}\input{sections/related}\input{sections/variants}\input{sections/protocol}
+\input{sections/results}\input{sections/discussion}\input{sections/threats}\input{sections/conclusion}
+\bibliographystyle{plainnat}\bibliography{references}
+\appendix\input{sections/appendix}
+\end{document}

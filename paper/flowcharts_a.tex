@@ -1,0 +1,22 @@
+\begin{minipage}[t]{0.33\linewidth}\centering\textbf{V1}\\[2pt]
+\resizebox{\linewidth}{!}{\begin{tikzpicture}[node distance=5mm]
+\node[b](a){LLM formula; $\R_{llm}$ on train};\node[b,below=of a](b){scipy refit of constants\\keep if $\R_{fit}>\R_{llm}{+}0.001$};
+\node[b,below=of b](c){train NN; $\R_{nn}$};\node[d,below=of c](d){$\R_{fit}\!\ge\!.85$\\margin$>.05$?};
+\node[o,right=8mm of d](e){fitted\_llm};\node[d,below=of d](f){both $\ge.5$\\$|$margin$|\le.15$?};
+\node[o,right=8mm of f](g){ensemble};\node[o,below=of f](h){nn};
+\draw[ar](a)--(b);\draw[ar](b)--(c);\draw[ar](c)--(d);\draw[ar](d)--node[lb,above]{yes}(e);\draw[ar](d)--node[lb,left]{no}(f);
+\draw[ar](f)--node[lb,above]{yes}(g);\draw[ar](f)--node[lb,left]{no}(h);\end{tikzpicture}}\end{minipage}%
+\begin{minipage}[t]{0.33\linewidth}\centering\textbf{V2}\\[2pt]
+\resizebox{\linewidth}{!}{\begin{tikzpicture}[node distance=5mm]
+\node[b](a){LLM formula and NN\\both computed};\node[d,below=of a](b){force\_llm\\and $\R_{llm}>0$?};
+\node[o,right=8mm of b](c){llm (skip NN)};\node[d,below=of b](d){LLM ok and\\$\R_{llm}\ge\R_{nn}$?};
+\node[o,right=8mm of d](e){llm (wins/ties)};\node[d,below=of d](f){$\R_{nn}>\R_{llm}$\\and $\R_{nn}>.90$?};
+\node[o,right=8mm of f](g){ensemble\\(R$^2$-weighted)};\node[o,below=of f](h){nn};
+\draw[ar](a)--(b);\draw[ar](b)--node[lb,above]{yes}(c);\draw[ar](b)--node[lb,left]{no}(d);\draw[ar](d)--node[lb,above]{yes}(e);
+\draw[ar](d)--node[lb,left]{no}(f);\draw[ar](f)--node[lb,above]{yes}(g);\draw[ar](f)--node[lb,left]{no}(h);\end{tikzpicture}}\end{minipage}%
+\begin{minipage}[t]{0.33\linewidth}\centering\textbf{V3}\\[2pt]
+\resizebox{\linewidth}{!}{\begin{tikzpicture}[node distance=5mm]
+\node[b](a){$\hat y_{llm}$, $\hat y_{nn}$ (train)};\node[b,below=of a](b){residual std\\$\sigma_{llm},\sigma_{nn}$ (train only)};
+\node[b,below=of b](c){weights $\propto 1/\sigma$\\(source-dependent: A-007)};\node[b,below=of c](d){normalise};
+\node[o,below=of d](e){$w_{llm}\hat y_{llm}+w_{nn}\hat y_{nn}$};\node[o,right=6mm of c](f){on exception:\\argmax train $\R$};
+\draw[ar](a)--(b);\draw[ar](b)--(c);\draw[ar](c)--(d);\draw[ar](d)--(e);\draw[ar,dashed](c)--(f);\end{tikzpicture}}\end{minipage}

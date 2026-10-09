@@ -1,0 +1,18 @@
+# FROZEN variant ID table (resolves DESIGN.md issue I2).
+# Source of truth for: ingest, analytics, tables. Derived from the runner registry
+# in run_comparative_hybrid_methods.py (HybridComparativeSuite.REGISTRY) and
+# VARIANT_MANIFEST in experiment_protocol_hybrid.py.
+# registry: index passed to --methods.  aliases: regexes matched (case-insens.) against
+# the method name / class name found in result JSON (MethodResult.to_dict()["method"]).
+variants:
+  B_LLM:  {registry: 1, kind: baseline, name: "Pure LLM",                 aliases: ["PureLLM"]}
+  B_NN:   {registry: 2, kind: baseline, name: "Neural network (ImprovedNN)", aliases: ["ImprovedNN", "^nn$"]}
+  B_PYSR: {registry: 10, kind: baseline, name: "Pure PySR (V4 llm_mode=none)", aliases: ["pysr_none", "PureSymbolic"]}  # patch 0003; opt-in PYSR_BASELINE=1
+  V1: {registry: 3, kind: hybrid, name: "Enhanced Hybrid DeFi",        aliases: ["HybridDeFi", "EnhancedHybridDeFi"]}
+  V2: {registry: 4, kind: hybrid, name: "Hybrid All-Domains",          aliases: ["HybridAllDomains"]}
+  V3: {registry: 7, kind: hybrid, name: "Ensemble LLM+NN",             aliases: ["EnsembleLLMNN"]}
+  V4: {registry: 5, kind: hybrid, name: "LLM-prior / PySR family",     aliases: ["SymbolicEngine"]}
+  V5: {registry: 6, kind: hybrid, name: "Retry loop + optional physics fallback", aliases: ["HybridSystemV50", "V50_2"]}
+  V6: {registry: 8, kind: hybrid, name: "Validation-selected hybrid",  aliases: ["V4Selector"]}
+  V7: {registry: 9, kind: hybrid, name: "LLM-prior PySR seeding",      aliases: ["LLMPriorSeeding"]}
+# V6 under --pca is stored as variant V6 with split=pca (the manifest row "6-pca" is a split, not a method).

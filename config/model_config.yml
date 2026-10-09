@@ -1,0 +1,3 @@
+llm: {provider: anthropic, model: "claude-sonnet-5-5", temperature: 0, freeze_cache: true}
+nn:  {arch: [mlp_small, mlp_wide], optimizer: adamw, scheduler: cosine_warm_restarts, seed_from: sha256(description)}
+pysr: {populations: 30, generations: 10000, seed: 42, timeout_s: 900}

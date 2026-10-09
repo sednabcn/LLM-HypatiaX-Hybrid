@@ -1,0 +1,55 @@
+{
+ "static": {
+  "gt_leak_prompt_scan": [],
+  "test_residual_leak": [],
+  "dead_llm_path_files": []
+ },
+ "data": {
+  "engine_version_in_results": {
+   "V4": 0,
+   "V5": 0,
+   "V7": 0
+  },
+  "llm_variant_zero_api_calls": [
+   "B_LLM",
+   "V1",
+   "V2",
+   "V3",
+   "V4",
+   "V5",
+   "V6",
+   "V7"
+  ],
+  "portfolio_variance_discrepancy": [
+   {
+    "variant": "V1",
+    "seed": 42,
+    "exp": "hybrid_exp1",
+    "r2_train": 1.0,
+    "r2_far": -882.9
+   },
+   {
+    "variant": "V1",
+    "seed": 42,
+    "exp": "hybrid_exp1_pca",
+    "r2_train": 1.0,
+    "r2_far": -882.9
+   },
+   {
+    "variant": "V1",
+    "seed": 42,
+    "exp": "hybrid_exp1b",
+    "r2_train": 1.0,
+    "r2_far": -882.9
+   },
+   {
+    "variant": "V1",
+    "seed": 42,
+    "exp": "hybrid_exp1b_pca",
+    "r2_train": 1.0,
+    "r2_far": -882.9
+   }
+  ],
+  "catastrophic_total": 8
+ }
+}

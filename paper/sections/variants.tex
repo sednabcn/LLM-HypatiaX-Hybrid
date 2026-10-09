@@ -1,0 +1,15 @@
+\section{The seven variants}\label{sec:variants}
+Table~\ref{tab:variants} fixes the identifiers used throughout (resolving a mismatch between source documents, audit A-001). All variants consume an LLM-derived prior; they differ in \emph{where} it enters.
+\begin{table}[t]\centering\small\rtab{t1_variants}\caption{Variants and baselines. Registry = index passed to the runner.}\label{tab:variants}\end{table}
+\begin{description}\setlength\itemsep{0pt}
+\item[V1] LLM formula $\to$ scipy constant refit (accepted if train $\R$ improves by $>0.001$) $\to$ gate: \emph{fitted-symbolic} if $\R_{fit}\ge0.85$ and margin $>0.05$; \emph{ensemble} if both $\ge0.5$ and $|\text{margin}|\le0.15$; else NN.
+\item[V2] Tie-favours-symbolic gate ($\R_{llm}\ge\R_{nn}$), \texttt{force\_llm} override for known physics families, blend only if NN wins with $\R_{nn}>0.90$.
+\item[V3] Precision-weighted blend of LLM and NN predictions, no hard gate. \emph{Weighting differs between our sources (audit A-007) and is fixed by the implementation actually run.}
+\item[V4] \texttt{SymbolicEngineWithLLM}: modes \emph{none/seed/hybrid/fallback}; hybrid returns the LLM formula if $\R>0.95$, discards it if $<0.5$, else seeds PySR and keeps the better; fallback runs PySR first and calls the LLM only if $\R\le0.90$.
+\item[V5] A retry loop around one search engine (up to five attempts, seeds $42{+}k$, early stop at $\R\ge0.95$) with an optional physics-aware regressor, \emph{disabled by default} (A-006). It consumes up to five times V4's search budget (A-022); Table~\ref{tab:cost} reports cost.
+\item[V6] Validation-selected residual hybrid (DeFi): candidate pool \{LLM, NN$\times2$, residual-NN, blend over a 21-point grid, linear fallback\}, chosen on an edge validation slice taken from the high end of the \emph{training} range; an extrapolation guard removes bare NN candidates when the test domain leaves the training range.
+\item[V7] LLM candidates are converted to PySR \texttt{guesses} \emph{before} search (population seeding), compared with an unseeded run on the same case; the run refuses to start if the engine cannot accept guesses.
+\end{description}
+\begin{figure}[t]\centering\input{flowcharts_a}\caption{Decision flows of V1--V3.}\label{fig:flow1}\end{figure}
+\begin{figure}[t]\centering\input{flowcharts_b}\caption{Decision flows of V4--V7.}\label{fig:flow2}\end{figure}
+\begin{figure}[t]\centering\input{pipeline}\caption{Study pipeline: package $\to$ experiments $\to$ database $\to$ paper.}\label{fig:pipeline}\end{figure}

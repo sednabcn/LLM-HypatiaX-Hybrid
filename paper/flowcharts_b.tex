@@ -1,0 +1,35 @@
+\begin{minipage}[t]{\linewidth}\centering\textbf{V4 (llm\_mode)}\\[2pt]
+\resizebox{\linewidth}{!}{\begin{tikzpicture}[every node/.append style={text width=2.5cm}]
+\node[d,text width=1.6cm](m) at (3.6,0){mode?};
+\node[o](n) at (0,-2){none:\\pure PySR, no LLM};
+\node[b](s) at (3.0,-2){seed: LLM operators\\+ guesses seed PySR};
+\node[d,text width=1.8cm](h) at (6.2,-2){hybrid:\\$\R_{llm}$?};
+\node[d,text width=1.8cm](f) at (9.6,-2){fallback:\\PySR $\R$?};
+\node[o](h1) at (6.2,-4){$>.95$: return LLM only};
+\node[b](h2) at (6.2,-5.6){$[.5,.95]$: PySR seeded from LLM, keep better;\\$<.5$: discard LLM, cold PySR};
+\node[o](f1) at (9.6,-4){$>.90$: return PySR only};
+\node[b](f2) at (9.6,-5.6){$\le.90$: call LLM,\\keep better of both};
+\draw[ar](m)--(n);\draw[ar](m)--(s);\draw[ar](m)--(h);\draw[ar](m)--(f);
+\draw[ar](h)--(h1);\draw[ar](h1)--(h2);\draw[ar](f)--(f1);\draw[ar](f1)--(f2);
+\end{tikzpicture}}\end{minipage}\\[6mm]
+\begin{minipage}[t]{0.5\linewidth}\centering\textbf{V5 (retry + fallback)}\\[2pt]
+\resizebox{\linewidth}{!}{\begin{tikzpicture}[node distance=5mm]
+\node[b](a){attempt $k=0..4$, seed $42{+}k$\\PySR search};\node[d,below=of a](b){$\R\ge.95$ and\\not overfit?};
+\node[o,right=8mm of b](c){return best};\node[b,below=of b](d){after loop: best $\R$};
+\node[d,below=of d](e){fallback enabled and\\best $\R<.85$?};\node[o,right=8mm of e](f){PhysicsAwareRegressor;\\keep if better};\node[o,below=of e](g){return best};
+\draw[ar](a)--(b);\draw[ar](b)--node[lb,above]{yes}(c);\draw[ar](b)--node[lb,left]{no}(d);\draw[ar,bend left=45](d.west)to node[lb,left]{next attempt}(a.west);
+\draw[ar](d)--(e);\draw[ar](e)--node[lb,above]{yes}(f);\draw[ar](e)--node[lb,left]{no}(g);\end{tikzpicture}}\end{minipage}%
+\begin{minipage}[t]{0.5\linewidth}\centering\textbf{V6 (validation-selected, DeFi)}\\[2pt]
+\resizebox{\linewidth}{!}{\begin{tikzpicture}[node distance=5mm]
+\node[b](a){candidates: llm, nn$\times2$, residual-nn,\\blend (21-pt grid), linear fallback};
+\node[b,below=of a](b){edge validation slice =\\high end of \emph{training} range};
+\node[d,below=of b](c){test domain outside\\training range?};\node[b,right=8mm of c](d){drop bare nn;\\if no LLM-anchored left:\\rank linear fallbacks};
+\node[b,below=of c](e){score on slice; tie-break\\llm$>$residual$>$blend$>$linear$>$nn};\node[o,below=of e](f){selected candidate};
+\draw[ar](a)--(b);\draw[ar](b)--(c);\draw[ar](c)--node[lb,above]{yes}(d);\draw[ar](c)--node[lb,left]{no}(e);\draw[ar](d)|-(e);\draw[ar](e)--(f);\end{tikzpicture}}\end{minipage}\\[6mm]
+\begin{minipage}[t]{0.5\linewidth}\centering\textbf{V7 (PySR population seeding)}\\[2pt]
+\resizebox{\linewidth}{!}{\begin{tikzpicture}[node distance=5mm]
+\node[d](a){engine accepts\\guesses?};\node[o,right=8mm of a](x){refuse to run};
+\node[b,below=of a](b){LLM prior $\to$ candidate expressions};\node[b,below=of b](c){convert each to a guess;\\drop invalid ones (warn)};
+\node[b,below=of c](d){seeded PySR (H)};\node[b,right=8mm of d](e){unseeded PySR (P)\\same case};\node[o,below=of d](f){compare H vs P};
+\node[o,right=8mm of b](g){LLM exception:\\cold unseeded run};
+\draw[ar](a)--node[lb,above]{no}(x);\draw[ar](a)--node[lb,left]{yes}(b);\draw[ar](b)--(c);\draw[ar](c)--(d);\draw[ar](d)--(f);\draw[ar](e)|-(f);\draw[ar,dashed](b)--(g);\end{tikzpicture}}\end{minipage}

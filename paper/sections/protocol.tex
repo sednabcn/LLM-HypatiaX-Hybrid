@@ -1,0 +1,7 @@
+\section{Experimental protocol}\label{sec:protocol}
+\paragraph{Experiments.} Seven steps (Table~\ref{tab:exps}) run four protocols (DeFi, Feynman, Nguyen-12, all-30) under random, PCA-directed or far splits. A variant runs only on protocols it declares support for; comparisons never pool across protocols and never rank a method on cases it did not run (same-cases rule). Variant V7 runs only on Nguyen-12.
+\begin{table}[t]\centering\small\rtab{t3_experiments}\caption{Experiment inventory (mirrors \texttt{run\_hybrid\_all.sh}).}\label{tab:exps}\end{table}
+\paragraph{Metrics.} Primary: far-extrapolation $\rfar$ on the five-tier ladder; secondary: in-distribution test $\R$, near-perfect rate ($\rfar>0.99$), catastrophic rate ($\rfar<-1$), RMSE, MAE.
+\paragraph{Win rate.} Per case, the score of a method is the median over seeds of $\rfar$ (failed runs score $-\infty$). The method with the highest score wins; all methods within $0.01$ of the best share a tie and receive $0.5$ each (so tied win scores can sum above one). The win rate is the mean over cases with a 10\,000-resample percentile bootstrap interval (resampling cases). We also report pairwise win matrices, Friedman with Nemenyi critical difference, and Wilcoxon--Holm tests.
+\paragraph{Hyper-parameters.} Table~\ref{tab:hp}.
+\begin{table}[t]\centering\small\rtab{t14_hparams}\caption{Hyper-parameters and thresholds.}\label{tab:hp}\end{table}

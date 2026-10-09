@@ -1,0 +1,2 @@
+stats: {tests: [wilcoxon_holm, friedman_nemenyi], bootstrap_ci: 10000, near_perfect_r2: 0.99, catastrophic_r2: -1.0}
+exports: {tables: paper/tables, figures: paper/figures}
