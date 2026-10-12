@@ -1,0 +1,61 @@
+bibkey,status,id,matched_title,score
+cranmer2023pysr,verified,arXiv:2305.01582v3,Interpretable Machine Learning for Science with PySR and SymbolicRegression.jl,1.0
+udrescu2020aifeynman,verified,10.1126/sciadv.aay2631,AI Feynman: A physics-inspired method for symbolic regression,1.0
+koza1992gp,unverified,,,0
+schmidt2009distilling,verified,10.1126/science.1165893,Distilling Free-Form Natural Laws from Experimental Data,1.0
+brunton2016sindy,verified,10.1073/pnas.1517384113,Discovering governing equations from data by sparse identification of nonlinear dynamical systems,1.0
+petersen2021dsr,unverified,,,0
+biggio2021nsr,verified,arXiv:2106.06427v1,Neural Symbolic Regression that Scales,1.0
+kamienny2022e2e,verified,10.52202/068431-0746,End-To-End Symbolic Regression with Transformers,1.0
+lacava2021srbench,verified,arXiv:2107.14351v1,Contemporary Symbolic Regression Methods and their Relative Performance,1.0
+uy2011nguyen,verified,10.1007/s10710-010-9121-2,Semantically-based crossover in genetic programming: application to real-valued symbolic regression,1.0
+vaswani2017attention,verified,arXiv:1706.03762v7,Attention Is All You Need,1.0
+brown2020gpt3,verified,arXiv:2005.14165v4,Language Models are Few-Shot Learners,1.0
+wei2022cot,verified,arXiv:2201.11903v6,Chain-of-Thought Prompting Elicits Reasoning in Large Language Models,1.0
+romeraparedes2024funsearch,verified,10.1038/s41586-023-06924-6,Mathematical discoveries from program search with large language models,1.0
+raissi2019pinn,verified,10.1016/j.jcp.2018.10.045,Physics-informed neural networks: A deep learning framework for solving forward and inverse problems involving nonlinear partial differential equations,1.0
+xu2021extrapolate,verified,arXiv:2009.11848v5,How Neural Networks Extrapolate: From Feedforward to Graph Neural Networks,1.0
+loshchilov2019adamw,unverified,,,0
+loshchilov2017sgdr,verified,arXiv:1608.03983v5,SGDR: Stochastic Gradient Descent with Warm Restarts,1.0
+ba2016layernorm,verified,arXiv:1607.06450v1,Layer Normalization,1.0
+elfwing2018silu,verified,10.1016/j.neunet.2017.12.012,Sigmoid-weighted linear units for neural network function approximation in reinforcement learning,1.0
+virtanen2020scipy,verified,arXiv:1907.10121v1,SciPy 1.0--Fundamental Algorithms for Scientific Computing in Python,0.971
+paszke2019pytorch,verified,arXiv:1912.01703v1,"PyTorch: An Imperative Style, High-Performance Deep Learning Library",1.0
+meurer2017sympy,unverified,,,0
+lakshminarayanan2017deepensembles,verified,arXiv:1612.01474v3,Simple and Scalable Predictive Uncertainty Estimation using Deep Ensembles,1.0
+breiman1996bagging,verified,10.1007/bf00058655,Bagging predictors,1.0
+wolpert1992stacking,unverified,,,0
+dietterich2000ensemble,unverified,,,0
+efron1993bootstrap,unverified,,,0
+demsar2006statistical,unverified,,,0
+wilcoxon1945ranking,verified,10.2307/3001968,Individual Comparisons by Ranking Methods,1.0
+friedman1937use,verified,10.1080/01621459.1937.10503522,The Use of Ranks to Avoid the Assumption of Normality Implicit in the Analysis of Variance,1.0
+holm1979simple,unverified,,,0
+benjamini1995fdr,verified,10.1111/j.2517-6161.1995.tb02031.x,Controlling the False Discovery Rate: A Practical and Powerful Approach to Multiple Testing,1.0
+kaplan2020scaling,unverified,,,0
+schick2023toolformer,verified,10.52202/075280-2997,Toolformer: Language Models Can Teach Themselves to Use Tools,1.0
+yao2023react,unverified,,,0
+pearson1901pca,unverified,,,0
+hotelling1933pca,verified,10.1037/h0071325,Analysis of a complex of statistical variables into principal components.,0.993
+michaelis1913kinetik,unverified,,,0
+markowitz1952portfolio,unverified,,,0
+black1973pricing,unverified,,,0
+angeris2020cfmm,verified,10.2139/ssrn.3636514,Improved Price Oracles: Constant Function Market Makers,1.0
+quinonero2009shift,unverified,,,0
+hastie2009esl,unverified,,,0
+bishop2006prml,unverified,,,0
+wolpert1997nfl,unverified,,,0
+hornik1989approx,verified,10.1016/0893-6080(89)90020-8,Multilayer feedforward networks are universal approximators,1.0
+cybenko1989approx,unverified,,,0
+virgolin2022nphard,unverified,,,0
+matsubara2022rethinking,unverified,,,0
+shojaee2025llmsr,unverified,,,0
+cornelio2023descartes,verified,10.1038/s41467-023-37236-y,Combining data and theory for derivable scientific discovery with AI-Descartes,1.0
+lample2020mathematics,unverified,,,0
+rudin2019stop,verified,10.1038/s42256-019-0048-x,Stop explaining black box machine learning models for high stakes decisions and use interpretable models instead,1.0
+guo2017calibration,unverified,,,0
+zhang2017rethinking,unverified,,,0
+ziyin2020periodic,unverified,,,0
+balestriero2021extrapolation,unverified,,,0
+shojaee2025llmsrbench,unverified,,,0
+sahoo2018eqldiv,unverified,,,0
