@@ -1,9 +1,11 @@
 # One-command flows. `make dryrun` proves the plumbing on SYNTHETIC data; `make real` is the only path to paper numbers.
 PY ?= python3
 RESULTS ?= results
-.PHONY: test dryrun real paper paper-dryrun refs audit clean help
+.PHONY: cases test dryrun real paper paper-dryrun refs audit clean help
 help:
 	@echo "make test | dryrun | real RESULTS=<dir> | refs | audit | clean"
+cases:                        ## validate case files (expected to fail until P1 has 30 verified cases)
+	$(PY) scripts/validate_cases.py
 test:
 	$(PY) -m pytest -q rsc/experiments/tests
 dryrun:                       ## synthetic end-to-end: synth -> ingest -> audit -> tables/figures -> PDF (watermarked)

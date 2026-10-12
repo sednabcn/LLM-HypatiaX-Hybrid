@@ -1,20 +1,92 @@
-# P1 - Market risk and model validation. STATUS: EMPTY (drafting starts at PLAYBOOK step 3.1, after steps 0-2).
-# Target: 30 cases = 10 canonical + 10 perturbed + 10 composed. Every case needs a verified source.
-# TEMPLATE (do not uncomment without a verified source):
-#  - id: P1-001
-#    name: "<short name>"                 # shown to the LLM in the 'semantic' view only
-#    family: <family_key>                 # related cases share a family (bootstrap resamples families)
-#    tier: canonical | perturbed | composed
-#    derived_from: P1-0xx                 # perturbed: one id; composed: a list of >= 2 ids; canonical: omit
-#    target: y
-#    formula: "<sympy-parsable>"          # ground truth: NEVER shown to the LLM
-#    constants: {name: value}
-#    variables: {v: {train: [lo, hi], far: [lo, hi], unit: "..."}}
-#    description: "<what the quantity means, with NO formula, '=', '**' or '^'>"
-#    source: "<citation or URL>"
-#    source_verified: false               # set true only after the source was checked
-#    memorisation_risk: high | medium | low
-#    scale_note: "<needed only for extreme output scales>"
-protocol: P1
-version: 0
-cases: []
+# P1 - Market risk and model validation  (30 cases = 10 canonical + 10 perturbed + 10 composed)
+#
+# STATUS: schema header + 3 TEMPLATE rows only. The template rows show the fields; they are NOT the
+# real P1 list. Real cases are drafted in playbook step 3.1 and each needs source_verified: true (3.2).
+# Until then `validate_cases.py` reports tier-count errors and unverified-source warnings, on purpose.
+#
+# Field guide (this is the "schema" you approve in playbook step 1.2):
+#   id                 unique, from the formula (not from the protocol): P1_<family>_<short>
+#   protocol           P1 ... P5
+#   tier               canonical | perturbed | composed
+#   domain             free text, e.g. market_risk
+#   family             related cases share a family; bootstrap resamples FAMILIES, not cases
+#   name               human name (hidden in the anonymous view)
+#   formula            sympy string using only declared variables and constants
+#   variables          name -> {train: [lo, hi], far: [lo, hi]}   (far must extend beyond train)
+#   constants          name -> number (fixed parameters of the form)
+#   description        what the target quantity is, WITHOUT the formula (the LLM sees this)
+#   source             citation of the textbook/standard the form comes from
+#   source_verified    true only after a search check AND your review as domain expert
+#   memorisation_risk  low | medium | high   (your judgement, later compared with the recall probe)
+#   derived_from       id (or list of ids) of the original; required for perturbed and composed
+#   difficulty         1-5 tier on the extrapolation ladder
+#   tractable          false if you doubt it is solvable from data + description alone
+schema:
+  version: 1
+  protocol: P1
+  tier_rule: [10, 10, 10]
+  n_samples_check: 256
+
+cases:
+  - id: P1_param_var_normal
+    protocol: P1
+    tier: canonical
+    domain: market_risk
+    family: parametric_var
+    name: Parametric (normal) Value-at-Risk
+    formula: "V * (z * sigma * sqrt(h) - mu * h)"
+    variables:
+      V:     {train: [1.0e6, 1.0e7], far: [1.0e7, 5.0e7]}
+      sigma: {train: [0.005, 0.03],  far: [0.03, 0.08]}
+      h:     {train: [1, 10],        far: [10, 30]}
+      mu:    {train: [0.0, 0.001],   far: [0.001, 0.003]}
+    constants: {z: 1.645}
+    description: "Loss quantile of a portfolio over a horizon given exposure, daily volatility, horizon in days and daily drift."
+    source: "TEMPLATE - cite standard reference here (e.g. Jorion, Value at Risk)"
+    source_verified: false
+    memorisation_risk: high
+    difficulty: 2
+    tractable: true
+
+  - id: P1_param_var_power
+    protocol: P1
+    tier: perturbed
+    domain: market_risk
+    family: parametric_var
+    name: Parametric VaR with non-square-root horizon scaling
+    formula: "V * (z * sigma * h**0.6 - mu * h)"
+    variables:
+      V:     {train: [1.0e6, 1.0e7], far: [1.0e7, 5.0e7]}
+      sigma: {train: [0.005, 0.03],  far: [0.03, 0.08]}
+      h:     {train: [1, 10],        far: [10, 30]}
+      mu:    {train: [0.0, 0.001],   far: [0.001, 0.003]}
+    constants: {z: 1.645}
+    description: "Loss quantile over a horizon where volatility scales with a persistence exponent rather than the usual square root."
+    derived_from: P1_param_var_normal
+    source: "TEMPLATE - derived from P1_param_var_normal (Hurst-type scaling)"
+    source_verified: false
+    memorisation_risk: low
+    difficulty: 3
+    tractable: true
+
+  - id: P1_var_sharpe_composed
+    protocol: P1
+    tier: composed
+    domain: market_risk
+    family: parametric_var
+    name: VaR-adjusted return ratio
+    formula: "(r - rf) / (V * (z * sigma * sqrt(h)) / 1.0e6)"
+    variables:
+      V:     {train: [1.0e6, 1.0e7], far: [1.0e7, 5.0e7]}
+      sigma: {train: [0.005, 0.03],  far: [0.03, 0.08]}
+      h:     {train: [1, 10],        far: [10, 30]}
+      r:     {train: [0.01, 0.05],   far: [0.05, 0.12]}
+      rf:    {train: [0.0, 0.01],    far: [0.01, 0.02]}
+    constants: {z: 1.645}
+    description: "Excess return divided by the loss quantile per million of exposure."
+    derived_from: [P1_param_var_normal]
+    source: "TEMPLATE - composition of a Sharpe-type ratio and parametric VaR"
+    source_verified: false
+    memorisation_risk: low
+    difficulty: 4
+    tractable: true

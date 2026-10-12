@@ -1,215 +1,372 @@
 #!/usr/bin/env python3
-"""Validate the anchor case files (cases/P*.yml): the single, unique list of target formulas.
+"""Validate benchmark case files (cases/P*.yml) before they are frozen.
 
-  python scripts/validate_cases.py                       # all cases/P*.yml
-  python scripts/validate_cases.py --strict              # warnings also fail
-  python scripts/validate_cases.py --freeze P1           # write sha256 to cases/FROZEN.json (needs a clean P1)
-  python scripts/validate_cases.py --export-views DIR    # LLM-visible views: semantic + anonymous (no formula)
+Playbook step 1.1 / 3.3 / 3.4.
 
-Every finding has a code. E_* fail the run, W_* are warnings.
-Checks (each comes from a defect already seen in this project):
-  E_MISSING/E_PARSE/E_SYMBOLS  schema, formula must parse, symbols declared
-  E_DUP                        same functional STRUCTURE twice (constants/variables renamed) -> one case, not two
-  E_CONST                      near-constant target (the Reserve-Ratio bug: ratio ~ 1.0 everywhere)
-  E_NONFINITE                  NaN/inf anywhere in the train or far region
-  E_NOEXTRAP                   no variable has a far range outside its train range
-  E_LEAK                       description contains the formula, '=', '**' or '^'
-  E_TIER/E_PARENT              tier rules: canonical has no parent, perturbed has 1, composed has >= 2 existing parents
-  W_SCALE                      extreme output scale (the Newton-gravity R2 guard bug) without a scale_note
-  W_CONSTLEAK                  description contains a declared constant's numeric value
-Limits: structure-dedup canonicalises variable order (<= 6 variables) but not algebraic identities beyond
-sympy.expand; formulas are parsed with sympy.sympify after a character whitelist -- fine for a trusted repo,
-NOT sufficient for formulas submitted by external users (the app needs a proper sandbox).
+Usage:
+  python scripts/validate_cases.py                 # validate every cases/P*.yml
+  python scripts/validate_cases.py cases/P1_market_risk.yml
+  python scripts/validate_cases.py --freeze P1     # validate, then write the hash to cases/FROZEN.json
+  python scripts/validate_cases.py --check-frozen  # fail if a frozen protocol changed
+
+Exit code 0 only when there are no errors. Warnings never fail the run, but --freeze
+refuses to freeze while any warning remains (rule: "0 warnings unexplained").
+
+What it checks (per case):
+  E  required fields present, tier/domain/protocol values valid, id unique
+  E  formula parses; every symbol is a declared variable or constant
+  E  far range lies outside the train range on at least one variable
+  E  target is finite on train AND far regions (sampled)
+  E  target has real variance on the train region (catches constant-output bugs)
+  E  derived cases name an existing `derived_from` id in the same file
+  E  no duplicate functional form (canonical form + numeric fingerprint)
+  W  extreme output scale (the 1e-10 guard class of bug)
+  W  source_verified is not true / no source
+  W  tractable is false
+Per file:
+  E  tier counts differ from the rule (default 10/10/10)
+  E  fewer than --min-per-domain cases in a domain (only if the rule is enabled)
+
+NOT checked here (moved to playbook step 5.3): correlation between generated inputs.
+This validator samples inputs itself, so it cannot see a bug in the real data generator.
 """
 from __future__ import annotations
-import argparse, hashlib, itertools, json, pathlib, re, sys, zlib
-import numpy as np, yaml, sympy as sp
 
-ROOT = pathlib.Path(__file__).resolve().parents[1]
-REQUIRED = ["id", "name", "family", "tier", "formula", "target", "variables", "description", "source", "memorisation_risk"]
+import argparse
+import hashlib
+import json
+import re
+import sys
+import warnings
+from pathlib import Path
+
+import numpy as np
+import sympy as sp
+import yaml
+
+ROOT = Path(__file__).resolve().parents[1]
 TIERS = ("canonical", "perturbed", "composed")
-RISKS = ("high", "medium", "low")
-N_PTS = 2000
-ALLOWED = re.compile(r"^[A-Za-z0-9_+\-*/^().,\s]+$")
-SAFE = {n: getattr(sp, n) for n in ("sqrt", "exp", "log", "sin", "cos", "tan", "atan", "Abs", "Min", "Max", "erf", "pi")}
-SAFE["Phi"] = lambda x: (1 + sp.erf(x / sp.sqrt(2))) / 2   # standard normal CDF
+REQUIRED = ("id", "protocol", "tier", "domain", "family", "name", "formula",
+            "variables", "source", "memorisation_risk")
+RISKS = ("low", "medium", "high")
+N_SAMPLES = 256
+SCALE_HI, SCALE_LO = 1e8, 1e-8
+VAR_REL_TOL = 1e-9          # std / (|mean| + eps) below this = "no real variance"
 
-def parse(case):
-    """-> (expr, findings). expr is None when the formula cannot be used."""
-    f = []
-    formula = str(case.get("formula", ""))
-    if not ALLOWED.match(formula) or "__" in formula:
-        return None, [("E_PARSE", "formula has characters outside the whitelist")]
-    names = list(case.get("variables") or {}) + list(case.get("constants") or {})
-    loc = {**SAFE, **{n: sp.Symbol(n) for n in names}}
-    try:
-        expr = sp.sympify(formula.replace("^", "**"), locals=loc)
-    except Exception as e:
-        return None, [("E_PARSE", f"formula does not parse: {e}")]
-    free = {s.name for s in expr.free_symbols}
-    if free - set(names):
-        f.append(("E_SYMBOLS", f"undeclared symbols: {sorted(free - set(names))}"))
-    if set(case.get("variables") or {}) - free:
-        f.append(("W_UNUSED", f"declared but unused variables: {sorted(set(case['variables']) - free)}"))
-    return expr, f
 
-def structure_key(expr, var_names, const_names):
-    vs = [sp.Symbol(n) for n in var_names]; cs = [sp.Symbol(n) for n in const_names]
-    perms = itertools.permutations(range(len(vs))) if len(vs) <= 6 else [tuple(range(len(vs)))]
-    best = None
-    for p in perms:
-        sub = {vs[i]: sp.Symbol(f"_v{p[i]}") for i in range(len(vs))}
-        sub.update({cs[i]: sp.Symbol(f"_c{i}") for i in range(len(cs))})
-        k = sp.srepr(sp.expand(expr.xreplace(sub)))
-        best = k if best is None or k < best else best
-    return best
+class Report:
+    def __init__(self) -> None:
+        self.errors: list[str] = []
+        self.warnings: list[str] = []
 
-def numeric(case, expr):
-    f = []
-    vars_ = case["variables"]; consts = {sp.Symbol(k): v for k, v in (case.get("constants") or {}).items()}
-    rng = np.random.default_rng(zlib.crc32(case["id"].encode()))
-    names = list(vars_)
-    fn = sp.lambdify([sp.Symbol(n) for n in names], expr.xreplace(consts), modules=["scipy", "numpy"])
+    def err(self, case: str, msg: str) -> None:
+        self.errors.append(f"[{case}] {msg}")
+
+    def warn(self, case: str, msg: str) -> None:
+        self.warnings.append(f"[{case}] {msg}")
+
+
+# ----------------------------------------------------------------------------- helpers
+def _parse(formula: str, names: list[str]) -> sp.Expr:
+    local = {n: sp.Symbol(n, real=True) for n in names}
+    return sp.sympify(formula, locals=local)
+
+
+def _sample(var_ranges: dict, which: str, rng: np.random.Generator, n: int = N_SAMPLES):
     out = {}
-    for region in ("train", "far"):
-        try:
-            pts = [rng.uniform(*vars_[n][region], size=N_PTS) for n in names]
-        except Exception:
-            return [("E_MISSING", f"variables need train and far [lo, hi] ranges")], None
-        with np.errstate(all="ignore"):
-            y = np.broadcast_to(np.asarray(fn(*pts), dtype=float), (N_PTS,))
-        out[region] = y
-        if not np.all(np.isfinite(y)):
-            f.append(("E_NONFINITE", f"{region} region: {int((~np.isfinite(y)).sum())}/{N_PTS} non-finite values"))
-    ok = {r: y[np.isfinite(y)] for r, y in out.items()}
-    if len(ok["train"]) and np.std(ok["train"]) < 1e-3 * max(np.abs(ok["train"]).max(), 1e-300):
-        f.append(("E_CONST", "target is near-constant over the train region (relative std < 1e-3)"))
-    ymax = max((np.abs(v).max() for v in ok.values() if len(v)), default=0.0)
-    if (ymax < 1e-6 or ymax > 1e9) and not case.get("scale_note"):
-        f.append(("W_SCALE", f"output scale {ymax:.2e} is extreme; add a scale_note and check the R2 guard"))
-    return f, out
+    for name, spec in var_ranges.items():
+        lo, hi = spec[which]
+        out[name] = rng.uniform(lo, hi, n)
+    return out
 
-def check_case(case, all_ids):
-    f = []
-    miss = [k for k in REQUIRED if case.get(k) in (None, "", {}, [])]
-    if miss:
-        return [("E_MISSING", f"missing fields: {miss}")]
-    if case["tier"] not in TIERS: f.append(("E_TIER", f"tier must be one of {TIERS}"))
-    if case["memorisation_risk"] not in RISKS: f.append(("E_MISSING", f"memorisation_risk must be one of {RISKS}"))
-    parents = case.get("derived_from") or []
-    parents = [parents] if isinstance(parents, str) else list(parents)
-    need = {"canonical": 0, "perturbed": 1, "composed": 2}.get(case["tier"])
-    if need is not None and ((case["tier"] == "canonical" and parents) or (case["tier"] != "canonical" and len(parents) < need)
-                             or (case["tier"] == "perturbed" and len(parents) != 1)):
-        f.append(("E_TIER", f"tier '{case['tier']}' needs {'no' if need == 0 else need} parent(s) in derived_from, got {len(parents)}"))
-    for p in parents:
-        if p not in all_ids: f.append(("E_PARENT", f"derived_from '{p}' is not a case id"))
-    d = str(case["description"])
-    if "=" in d or "**" in d or "^" in d or str(case["formula"]) in d:
-        f.append(("E_LEAK", "description contains '=', '**', '^' or the formula itself"))
-    for k, v in (case.get("constants") or {}).items():
-        if re.search(rf"(?<![\w.]){re.escape(str(v))}(?![\w.])", d):
-            f.append(("W_CONSTLEAK", f"description contains the value of constant '{k}'"))
-    expr, pf = parse(case); f += pf
-    if expr is None or any(c.startswith("E_") for c, _ in pf):
-        return f
-    vars_ = case["variables"]
+
+def _scan_points(var_ranges: dict, which: str, n: int = 2001) -> list[dict]:
+    """One-variable-at-a-time dense scans (others at midpoint) plus all-low/all-high corners."""
+    mids = {k: sum(v[which]) / 2 for k, v in var_ranges.items()}
+    out = []
+    for k, v in var_ranges.items():
+        d = {kk: np.full(n, mm) for kk, mm in mids.items()}
+        d[k] = np.linspace(v[which][0], v[which][1], n)
+        out.append(d)
+    for side in (0, 1):
+        out.append({k: np.array([v[which][side]]) for k, v in var_ranges.items()})
+    return out
+
+
+def _evaluate(expr: sp.Expr, consts: dict, names: list[str], data: dict) -> np.ndarray:
+    expr = expr.subs({sp.Symbol(k, real=True): v for k, v in consts.items()})
+    f = sp.lambdify([sp.Symbol(n, real=True) for n in names], expr, modules="numpy")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        y = f(*[data[n] for n in names])
+    return np.broadcast_to(np.asarray(y, dtype=float), (len(next(iter(data.values()))),))
+
+
+def canonical_key(expr: sp.Expr, consts: dict, names: list[str]) -> str:
+    """Structure-only key: constants substituted, variables renamed v0.. in sorted-name order."""
+    e = expr.subs({sp.Symbol(k, real=True): v for k, v in consts.items()})
+    ren = {sp.Symbol(n, real=True): sp.Symbol(f"v{i}") for i, n in enumerate(sorted(names))}
+    return sp.srepr(sp.simplify(sp.expand(e.xreplace(ren))))
+
+
+def numeric_fingerprint(expr: sp.Expr, consts: dict, names: list[str], train: dict) -> tuple | None:
+    """Evaluate on a fixed shared grid (unit cube mapped per variable position) so that
+    forms that differ only by variable names or algebraic arrangement collide."""
+    if not names:
+        return None
+    rng = np.random.default_rng(12345)
+    k = len(names)
+    pts = rng.uniform(0.5, 2.0, (16, k))          # shared positive points, same for all cases
+    order = sorted(names)
+    data = {n: pts[:, i] for i, n in enumerate(order)}
     try:
-        if not any(v["far"][0] >= v["train"][1] or v["far"][1] <= v["train"][0] for v in vars_.values()):
-            f.append(("E_NOEXTRAP", "no variable has a far range outside its train range"))
-        nf, _ = numeric(case, expr); f += nf
-    except (KeyError, TypeError, IndexError):
-        f.append(("E_MISSING", "each variable needs train and far ranges as [lo, hi]"))
-    return f
+        y = _evaluate(expr, consts, order, data)
+    except Exception:
+        return None
+    if not np.all(np.isfinite(y)):
+        return None
+    return tuple(np.round(y, 8))
 
-def load(paths):
-    cases = []
-    for p in paths:
-        doc = yaml.safe_load(pathlib.Path(p).read_text()) or {}
-        for c in doc.get("cases") or []:
-            c = dict(c); c["_file"] = str(p); c["_protocol"] = doc.get("protocol"); cases.append(c)
-    return cases
 
-def validate(cases):
-    findings = {}
-    ids = [c.get("id") for c in cases]; idset = set(ids)
-    seen_names = {}
-    keys = {}
-    for c in cases:
-        cid = c.get("id", "?"); f = check_case(c, idset)
-        if ids.count(cid) > 1: f.append(("E_DUP", f"duplicate id {cid}"))
-        n = str(c.get("name", "")).lower()
-        if n and n in seen_names: f.append(("E_DUP", f"same name as {seen_names[n]}"))
-        seen_names[n] = cid
-        if c.get("_protocol") and not str(cid).startswith(str(c["_protocol"]) + "-"):
-            f.append(("E_MISSING", f"id must start with '{c['_protocol']}-'"))
-        expr, _ = parse(c) if c.get("formula") and c.get("variables") else (None, None)
-        if expr is not None:
-            k = structure_key(expr, list(c["variables"]), list(c.get("constants") or {}))
-            if k in keys: f.append(("E_DUP", f"same functional structure as {keys[k]} (use one case with a parameter)"))
-            else: keys[k] = cid
-        findings[cid] = f
-    return findings
+# ----------------------------------------------------------------------------- core
+def validate_cases(cases: list[dict], tier_rule=(10, 10, 10), min_per_domain: int = 0,
+                   check_tier_counts: bool = True) -> Report:
+    rep = Report()
+    rng = np.random.default_rng(0)
+    ids: dict[str, dict] = {}
+    forms: dict[str, str] = {}
+    prints: dict[tuple, str] = {}
 
-def freeze(proto, cases, findings):
-    mine = [c for c in cases if c["_protocol"] == proto]
-    errs = [(i, m) for c in mine for i, m in [(c["id"], x) for x in findings[c["id"]] if x[0].startswith("E_")]]
-    problems = [f"{i}: {m}" for i, m in errs]
-    if len(mine) != 30: problems.append(f"needs exactly 30 cases, has {len(mine)}")
-    for t in TIERS:
-        n = sum(c["tier"] == t for c in mine)
-        if n != 10: problems.append(f"needs 10 '{t}' cases, has {n}")
-    for c in mine:
-        if c.get("source_verified") is not True: problems.append(f"{c['id']}: source_verified is not true")
-    if problems: return problems, None
-    body = [{k: v for k, v in c.items() if not k.startswith("_")} for c in sorted(mine, key=lambda c: c["id"])]
-    h = hashlib.sha256(json.dumps(body, sort_keys=True, default=str).encode()).hexdigest()
-    p = ROOT / "cases" / "FROZEN.json"
-    cur = json.loads(p.read_text()) if p.exists() else {}
-    if proto in cur and cur[proto]["sha256"] != h:
-        return [f"{proto} is already frozen with a different hash; create a new protocol version instead of editing"], None
-    cur[proto] = {"sha256": h, "n": len(mine)}; p.write_text(json.dumps(cur, indent=1))
-    return [], h
+    for idx, c in enumerate(cases):
+        cid = str(c.get("id", f"<case #{idx}>"))
+        missing = [f for f in REQUIRED if f not in c or c[f] in (None, "", {})]
+        if missing:
+            rep.err(cid, f"missing required fields: {', '.join(missing)}")
+            continue
+        if cid in ids:
+            rep.err(cid, "duplicate id")
+            continue
+        ids[cid] = c
+        if c["tier"] not in TIERS:
+            rep.err(cid, f"tier must be one of {TIERS}, got {c['tier']!r}")
+        if c["memorisation_risk"] not in RISKS:
+            rep.err(cid, f"memorisation_risk must be one of {RISKS}")
+        if not re.fullmatch(r"[A-Za-z0-9_\-]+", cid):
+            rep.err(cid, "id may contain only letters, digits, _ and -")
 
-def export_views(cases, out):
-    out = pathlib.Path(out); out.mkdir(parents=True, exist_ok=True); leaks = []
-    for c in cases:
-        names = list(c["variables"])
-        sem = {"id": c["id"], "name": c["name"], "description": c["description"], "target": c["target"],
-               "variables": {n: {"train": c["variables"][n]["train"], **({"unit": c["variables"][n]["unit"]} if "unit" in c["variables"][n] else {})} for n in names}}
-        anon = {"id": c["id"], "target": "y", "variables": {f"x{i+1}": {"train": c["variables"][n]["train"]} for i, n in enumerate(names)}}
-        for kind, v in (("semantic", sem), ("anonymous", anon)):
-            txt = json.dumps(v)
-            if str(c["formula"]) in txt or str(c.get("source", "@@")) in txt: leaks.append((c["id"], kind))
-            (out / f"{c['id']}.{kind}.json").write_text(json.dumps(v, indent=1))
-    return leaks
+        # variables / constants
+        vars_ = c["variables"]
+        consts = c.get("constants") or {}
+        bad_var = False
+        for vn, spec in vars_.items():
+            try:
+                tlo, thi = spec["train"]
+                flo, fhi = spec["far"]
+                assert tlo < thi and flo < fhi
+            except Exception:
+                rep.err(cid, f"variable {vn}: needs train:[lo,hi] and far:[lo,hi] with lo<hi")
+                bad_var = True
+        if bad_var:
+            continue
+        names = list(vars_)
 
-def main(argv=None):
-    ap = argparse.ArgumentParser()
-    ap.add_argument("paths", nargs="*"); ap.add_argument("--strict", action="store_true")
-    ap.add_argument("--freeze"); ap.add_argument("--export-views")
+        # formula
+        try:
+            expr = _parse(str(c["formula"]), names + list(consts))
+        except Exception as e:  # noqa: BLE001
+            rep.err(cid, f"formula does not parse: {e}")
+            continue
+        free = {s.name for s in expr.free_symbols}
+        unknown = free - set(names) - set(consts)
+        if unknown:
+            rep.err(cid, f"undeclared symbols in formula: {sorted(unknown)}")
+            continue
+        unused = set(names) - free
+        if unused:
+            rep.err(cid, f"declared variables not used by the formula: {sorted(unused)}")
+            continue
+
+        # far range must actually be outside train
+        outside = any(v["far"][0] < v["train"][0] or v["far"][1] > v["train"][1] for v in vars_.values())
+        if not outside:
+            rep.err(cid, "far range lies inside the train range on every variable (no extrapolation)")
+
+        # finiteness and variance
+        try:
+            ytr = _evaluate(expr, consts, names, _sample(vars_, "train", rng))
+            yfa = _evaluate(expr, consts, names, _sample(vars_, "far", rng))
+        except Exception as e:  # noqa: BLE001
+            rep.err(cid, f"formula cannot be evaluated: {e}")
+            continue
+        scan_bad = scan_ratio = 0.0
+        try:
+            for which, ysamp in (("train", ytr), ("far", yfa)):
+                ref = float(np.median(np.abs(ysamp[np.isfinite(ysamp)]))) + 1e-300 if np.any(np.isfinite(ysamp)) else 1.0
+                for d in _scan_points(vars_, which):
+                    ys = _evaluate(expr, consts, names, d)
+                    if not np.all(np.isfinite(ys)):
+                        rep.err(cid, f"target not finite on {which} region (dense scan / corner)")
+                        break
+                    scan_ratio = max(scan_ratio, float(np.max(np.abs(ys))) / ref)
+        except Exception:  # noqa: BLE001
+            pass
+        if scan_ratio > 1e3:
+            rep.warn(cid, f"near-singular or extreme growth (max|y| / median|y| = {scan_ratio:.3g}); "
+                          "confirm there is no pole inside the ranges")
+        if not np.all(np.isfinite(ytr)):
+            rep.err(cid, f"target not finite on train region ({np.sum(~np.isfinite(ytr))}/{N_SAMPLES} points)")
+        if not np.all(np.isfinite(yfa)):
+            rep.err(cid, f"target not finite on far region ({np.sum(~np.isfinite(yfa))}/{N_SAMPLES} points)")
+        if np.all(np.isfinite(ytr)):
+            sd, mu = float(np.std(ytr)), float(np.mean(np.abs(ytr)))
+            if sd == 0 or sd / (mu + 1e-300) < VAR_REL_TOL:
+                rep.err(cid, "target has no real variance on the train region (constant output)")
+            amax = float(np.max(np.abs(ytr)))
+            if amax > SCALE_HI or (0 < amax < SCALE_LO):
+                rep.warn(cid, f"extreme output scale (max |y| = {amax:.3g}); R2 guards may misfire")
+
+        # provenance
+        if not c.get("source_verified", False):
+            rep.warn(cid, "source_verified is not true (verify by search, then review as domain expert)")
+        if c.get("tractable") is False:
+            rep.warn(cid, "marked not tractable")
+
+        # duplicates
+        try:
+            key = canonical_key(expr, consts, names)
+            fp = numeric_fingerprint(expr, consts, names, vars_)
+            dup_reported = False
+            if key in forms:
+                rep.err(cid, f"duplicate functional form of {forms[key]} (canonical form)")
+                dup_reported = True
+            else:
+                forms[key] = cid
+            if fp is not None:
+                if fp in prints and not dup_reported:
+                    rep.err(cid, f"duplicate functional form of {prints[fp]} (numeric fingerprint)")
+                prints.setdefault(fp, cid)
+        except Exception as e:  # noqa: BLE001
+            rep.warn(cid, f"could not canonicalise formula for the duplicate check: {e}")
+
+    # derived_from links (second pass, ids now known)
+    for cid, c in ids.items():
+        if c.get("tier") in ("perturbed", "composed"):
+            src = c.get("derived_from")
+            srcs = src if isinstance(src, list) else ([src] if src else [])
+            if not srcs:
+                rep.err(cid, f"{c['tier']} case needs derived_from (id of the original case)")
+            for s in srcs:
+                if s not in ids:
+                    rep.err(cid, f"derived_from {s!r} does not exist in this file")
+                elif s == cid:
+                    rep.err(cid, "derived_from points to itself")
+
+    # per-file rules
+    if check_tier_counts:
+        for proto in sorted({str(c.get("protocol")) for c in ids.values()}):
+            sub = [c for c in ids.values() if str(c.get("protocol")) == proto]
+            got = tuple(sum(1 for c in sub if c.get("tier") == t) for t in TIERS)
+            if got != tuple(tier_rule):
+                rep.err(proto, f"tier counts {dict(zip(TIERS, got))} differ from rule {dict(zip(TIERS, tier_rule))}")
+    if min_per_domain:
+        by_dom: dict[str, int] = {}
+        for c in ids.values():
+            by_dom[c["domain"]] = by_dom.get(c["domain"], 0) + 1
+        for d, n in by_dom.items():
+            if n < min_per_domain:
+                rep.err(d, f"only {n} cases in domain (minimum {min_per_domain})")
+    return rep
+
+
+# ----------------------------------------------------------------------------- IO / freeze
+class _Loader(yaml.SafeLoader):
+    """PyYAML (YAML 1.1) reads 1.0e6 as a STRING because it wants 1.0e+6. Accept both."""
+
+
+_Loader.add_implicit_resolver(
+    "tag:yaml.org,2002:float",
+    re.compile(r"^[-+]?(?:[0-9][0-9_]*)(?:\.[0-9_]*)?(?:[eE][-+]?[0-9]+)$|^[-+]?\.[0-9_]+(?:[eE][-+]?[0-9]+)?$"),
+    list("-+0123456789."),
+)
+
+
+def load_file(path: Path) -> tuple[dict, list[dict]]:
+    doc = yaml.load(path.read_text(encoding="utf-8"), Loader=_Loader) or {}
+    return doc.get("schema", {}), doc.get("cases") or []
+
+
+def case_set_hash(cases: list[dict]) -> str:
+    blob = json.dumps(sorted(cases, key=lambda c: str(c.get("id"))), sort_keys=True, default=str)
+    return hashlib.sha256(blob.encode()).hexdigest()
+
+
+def frozen_path(root: Path) -> Path:
+    return root / "cases" / "FROZEN.json"
+
+
+def freeze(proto: str, root: Path, rep: Report, cases: list[dict], source_file: Path) -> None:
+    if rep.errors or rep.warnings:
+        raise SystemExit("refusing to freeze: resolve all errors and warnings first")
+    fp = frozen_path(root)
+    data = json.loads(fp.read_text()) if fp.exists() else {}
+    if proto in data:
+        raise SystemExit(f"{proto} is already frozen ({data[proto]['sha256'][:12]}); edits create a new version")
+    data[proto] = {"sha256": case_set_hash(cases), "n_cases": len(cases),
+                   "file": str(source_file.relative_to(root)), "version": 1}
+    fp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+    print(f"frozen {proto}: {data[proto]['sha256']}")
+
+
+def check_frozen(root: Path) -> int:
+    fp = frozen_path(root)
+    if not fp.exists():
+        print("no cases/FROZEN.json yet")
+        return 0
+    bad = 0
+    for proto, info in json.loads(fp.read_text()).items():
+        _, cases = load_file(root / info["file"])
+        h = case_set_hash(cases)
+        ok = h == info["sha256"]
+        print(f"{proto}: {'OK' if ok else 'CHANGED AFTER FREEZE'}")
+        bad += 0 if ok else 1
+    return 1 if bad else 0
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("files", nargs="*")
+    ap.add_argument("--freeze", metavar="PROTO")
+    ap.add_argument("--check-frozen", action="store_true")
+    ap.add_argument("--tiers", default="10,10,10")
+    ap.add_argument("--min-per-domain", type=int, default=0)
+    ap.add_argument("--root", default=str(ROOT))
     a = ap.parse_args(argv)
-    paths = a.paths or sorted((ROOT / "cases").glob("P*.yml"))
-    cases = load(paths); findings = validate(cases)
-    ne = nw = 0
-    for cid, fs in findings.items():
-        for code, msg in fs:
-            print(f"{code:12s} {cid}: {msg}"); ne += code.startswith("E_"); nw += code.startswith("W_")
-    by = {}
-    for c in cases:
-        d = by.setdefault(c["_protocol"], {t: 0 for t in TIERS})
-        d[c.get("tier")] = d.get(c.get("tier"), 0) + 1
-    print(f"[cases] {len(cases)} cases | tiers per protocol: {by} | errors={ne} warnings={nw}")
+    root = Path(a.root)
+
+    if a.check_frozen:
+        return check_frozen(root)
+
+    files = [Path(f) for f in a.files] or sorted((root / "cases").glob("P*.yml"))
     if a.freeze:
-        probs, h = freeze(a.freeze, cases, findings)
-        for p in probs: print("FREEZE-BLOCKED", p)
-        if h: print(f"[freeze] {a.freeze} sha256={h}")
-        else: return 1
-    if a.export_views and not ne:
-        leaks = export_views(cases, a.export_views)
-        for cid, k in leaks: print(f"E_LEAK       {cid}: {k} view contains formula/source")
-        if leaks: return 1
-    return 1 if ne or (a.strict and nw) else 0
+        files = [f for f in files if f.name.startswith(a.freeze)]
+        if not files:
+            print(f"no case file for {a.freeze}")
+            return 2
+    rule = tuple(int(x) for x in a.tiers.split(","))
+    rc = 0
+    for f in files:
+        _, cases = load_file(f)
+        rep = validate_cases(cases, rule, a.min_per_domain)
+        print(f"{f.name}: {len(cases)} cases, {len(rep.errors)} errors, {len(rep.warnings)} warnings")
+        for m in rep.errors:
+            print("  ERROR  ", m)
+        for m in rep.warnings:
+            print("  warning", m)
+        rc |= 1 if rep.errors else 0
+        if a.freeze and not rep.errors:
+            freeze(a.freeze, root, rep, cases, f)
+    return rc
+
 
 if __name__ == "__main__":
     sys.exit(main())

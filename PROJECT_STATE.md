@@ -1,8 +1,8 @@
 ---
-step: "Phase 4 - real runs not started; bridge (GitHub <-> web) being added"
-next_action: "Place real LLM-HypatiaX-REPRO beside this repo (A-016), run `source scripts/env.sh smoke`, then smoke-run exp1 and ingest"
+step: "Phase 1 done (validator + tests); waiting on 1.2 schema approval and Phase 0 decisions"
+next_action: "Approve or change the schema in cases/P1_market_risk.yml header (1.2); then decide 0.1-0.4 in config/variants.yml and config/anchor.yml"
 blockers: [A-016, A-014, A-006, A-007, A-012, A-020]
-updated: 2026-10-09
+updated: 2026-10-12
 ---
 # PROJECT_STATE
 
@@ -15,4 +15,5 @@ The YAML header above is machine-read by `scripts/export_state.py` -> `docs/stat
 - Update `step`, `next_action`, `blockers`, `updated` at the end of every session.
 
 ## Log
+- 2026-10-12: validator, tests and P1 schema header rebuilt in this zip (scripts/validate_cases.py). Bridge files (export_state.py, dashboard, workflows) are NOT in this zip; re-apply the patch if you still want them.
 - 2026-10-09: added state export, Pages dashboard, issue sync, results-branch workflow.
