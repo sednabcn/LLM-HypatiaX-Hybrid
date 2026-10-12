@@ -18,3 +18,4 @@ external/
 .pytest_cache/
 docs/state.json
 *.zip
+audit/references_report.csv
