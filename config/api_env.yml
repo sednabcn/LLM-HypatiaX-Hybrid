@@ -1,0 +1,40 @@
+# config/api_env.yml -- the ONE place the API environment is defined.
+# Secrets are never stored here: this file only names the environment variable that holds the key.
+#
+# The key is read from the process environment variable named by api_key_env (export it in your shell / CI secret).
+# The key is never printed, logged, cached or written to result rows.
+
+provider: anthropic
+api_key_env: ANTHROPIC_API_KEY        # name of the env var holding the key
+base_url_env: ANTHROPIC_BASE_URL      # optional env var; leave unset to use the default endpoint
+# Optional KEY=VALUE file, OFF by default. The repo's .gitignore does not list .env, so only set this to `.env`
+# after adding `.env` to .gitignore, otherwise a key can be committed by accident.
+dotenv: null
+
+# mode:
+#   live  -> real API calls; a missing key is an ERROR (use this for every anchor/paper run)
+#   mock  -> offline deterministic stand-in; results are NOT scientific results
+#   auto  -> live if a key is present, else mock (convenient for development ONLY)
+mode: auto
+
+# UNRESOLVED (decision 0.3): model_config.yml says claude-sonnet-5-5 / temperature 0,
+# anchor.yml says claude-sonnet-5 / 0.25. This file holds the values the code actually uses;
+# edit them here and delete the `llm:` block from model_config.yml so there is one source.
+model: claude-sonnet-5-5
+temperature: 0.0
+# If the model rejects `temperature`:
+#   true  -> raise (the run stops; nothing is silently different from what the config says)
+#   false -> retry without it and RECORD temperature_used=null in every result row
+strict_temperature: true
+
+max_tokens: 1500
+timeout_s: 60
+max_retries: 3                         # transport-level retries (429 / 5xx), handled by the SDK
+
+# Hard spend cap. Enforcement needs prices, and prices are not invented here:
+# fill in the current USD-per-million-token prices for your model from your Anthropic console,
+# then set budget_usd. If budget_usd is set while a price is null the loader refuses to start.
+budget_usd: null
+price_usd_per_mtok: {input: null, output: null}
+
+freeze_cache_env: HYPATIAX_LLM_FREEZE_CACHE   # path to a JSON cache: same (model, temperature, prompt) -> same text

@@ -1,9 +1,9 @@
 # One-command flows. `make dryrun` proves the plumbing on SYNTHETIC data; `make real` is the only path to paper numbers.
 PY ?= python3
 RESULTS ?= results
-.PHONY: cases test dryrun real paper paper-dryrun refs audit clean help
+.PHONY: cases test dryrun real paper paper-dryrun refs audit clean help methods-smoke
 help:
-	@echo "make test | dryrun | real RESULTS=<dir> | refs | audit | clean"
+	@echo "make test | dryrun | real RESULTS=<dir> | refs | audit | methods-smoke | clean"
 cases:                        ## validate case files (expected to fail until P1 has 30 verified cases)
 	$(PY) scripts/validate_cases.py
 test:
@@ -28,5 +28,7 @@ refs:                         ## needs internet (Crossref/arXiv)
 	$(PY) scripts/validate_refs.py paper/references.bib --fix --strict
 audit:
 	$(PY) rsc/experiments/analytics/audit_checks.py
+methods-smoke:                ## wiring check of rsc/methods on one synthetic task: prints only, writes nothing, NOT results
+	$(PY) -m rsc.methods.smoke
 clean:
 	cd paper && latexmk -C >/dev/null 2>&1; rm -rf _dryrun; rm -f rsc/db/results_dryrun.sqlite
