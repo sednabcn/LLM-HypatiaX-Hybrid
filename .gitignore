@@ -19,3 +19,4 @@ external/
 docs/state.json
 *.zip
 audit/references_report.csv
+audit_out/
