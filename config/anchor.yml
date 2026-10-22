@@ -1,0 +1,47 @@
+# config/anchor.yml  -- DRAFT for decisions 0.3 / 0.4
+# Status: PROPOSED. Nothing here is frozen until you reply "anchor approved".
+# Values marked "from paper" come from the HypatiaX paper as read earlier in this
+# project and must be checked against your real code. "???" = only you can decide.
+
+version: 0.1-draft
+frozen: false            # becomes true only when the config hash is committed
+
+llm:
+  model: claude-sonnet-5        # from paper (our old scaffold said claude-sonnet-5-5: mismatch, resolve)
+  temperature: 0.25             # from paper (scaffold said 0)
+  record_exact_model_string: true   # store the exact string with every run row
+
+seeds: [42, 99, 123, 777, 2024]  # from paper's Nguyen-12 seeds (scaffold said 42-46: mismatch, resolve)
+
+splits:
+  - {name: random, train: 0.8, test: 0.2}   # from Protocol-30
+  - {name: pca,    train: 0.4, test: 0.6}   # from Protocol-30
+
+pysr:
+  populations: 2          # from paper (hardware limit)
+  niterations: 500        # from paper (scaffold said 10000 / 30 populations)
+  timeout_seconds: 900    # from paper
+
+metric:
+  primary: far_r2_recomputed_from_raw_predictions   # never the method-reported R2
+  near_perfect_threshold: ???      # one value for the anchor, e.g. 0.999; fixed before runs
+  catastrophic_threshold: -1.0     # proposed
+  tie_tolerances_for_sensitivity: [0, 1.0e-6, 1.0e-3, 0.01]
+  tie_tolerance_primary: ???       # paper used 0.01; confirm
+
+variants:
+  include: [V1, V2, V3, V4, V5]    # pending 0.1 (variant mapping, issues A-001 / A-022)
+  baselines: [B_LLM, B_NN, B_PYSR]
+  not_applicable: {V6: "DeFi-only", V7: "Nguyen-12-only"}
+  pure_llm_hardcoded_branch: off   # document in the paper; optionally also run it on
+
+comparability_key: [case_set_hash, split, seed, threshold, engine_version, config_hash]
+
+staging:                           # pilot before full run
+  pilot: {cases_per_protocol: 6, seeds: [42], must_pass_smoke: true}
+  full:  {requires: [pilot_passed, cost_estimate_approved]}
+
+compute:
+  where: ???                       # your machine, or a cloud machine
+  api_budget_usd: ???              # hard cap; run stops when reached
+  estimate_hours_note: "my rough estimate was ~80h+ for 150 cases x 8 methods x 5 seeds x 2 splits; confirm with a smoke run"
