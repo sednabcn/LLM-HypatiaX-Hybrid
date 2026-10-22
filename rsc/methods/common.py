@@ -6,6 +6,11 @@ from typing import Callable
 
 import numpy as np
 
+try:
+    from rsc.methods.metrics import r2 as _canonical_r2, selection_score as _selection_score
+except ImportError:  # running from inside rsc/
+    from methods.metrics import r2 as _canonical_r2, selection_score as _selection_score
+
 
 # ---------------------------------------------------------------- task / result
 @dataclass(frozen=True)
@@ -50,17 +55,9 @@ def safe_predict(fit: FitResult, X: np.ndarray) -> np.ndarray:
 
 
 # ---------------------------------------------------------------- metrics
-def r2(y_true, y_pred) -> float:
-    """R^2; -inf for non-finite or mis-shaped predictions (never raises, never NaN)."""
-    y_true = np.asarray(y_true, dtype=float)
-    y_pred = np.asarray(y_pred, dtype=float)
-    if y_pred.shape != y_true.shape or not np.all(np.isfinite(y_pred)):
-        return float("-inf")
-    ss_res = float(np.sum((y_true - y_pred) ** 2))
-    ss_tot = float(np.sum((y_true - y_true.mean()) ** 2))
-    if ss_tot <= 1e-300:
-        return 1.0 if ss_res <= 1e-9 else 0.0
-    return 1.0 - ss_res / ss_tot
+def r2(y_true, y_pred):
+    """Delegates to rsc.methods.metrics; undefined R^2 -> -inf (fail closed)."""
+    return _selection_score(_canonical_r2(y_true, y_pred))
 
 
 # ---------------------------------------------------------------- sandboxed evaluation

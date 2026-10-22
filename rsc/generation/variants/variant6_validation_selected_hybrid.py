@@ -57,11 +57,9 @@ def compute_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
     if not np.all(np.isfinite(y_pred)):
         return {"r2": float("-inf"), "mae": float("inf"), "rmse": float("inf")}
     ss_res = float(np.sum((y_true - y_pred) ** 2))
-    ss_tot = float(np.sum((y_true - y_true.mean()) ** 2))
-    r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else (1.0 if ss_res == 0 else float("-inf"))
-    return {"r2": r2, "mae": float(np.mean(np.abs(y_true - y_pred))),
+    return {"r2": _selection_score(_canonical_r2(y_true, y_pred)),
+            "mae": float(np.mean(np.abs(y_true - y_pred))),
             "rmse": float(np.sqrt(ss_res / max(len(y_true), 1)))}
-
 
 # ── data extrapolation check ────────────────────────────────────────────
 def extrapolates(X_train: np.ndarray, X_test: np.ndarray) -> bool:
