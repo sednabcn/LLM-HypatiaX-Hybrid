@@ -6,6 +6,7 @@ from rsc.methods import common
 from rsc.methods.common import Task, EquationError, predict_from_equation, try_predict, equation_ok, r2
 from rsc.methods.env import ApiEnv, EnvError
 from rsc.methods.llm import LLMClient, MockLLM, BudgetExceeded, TemperatureRejected
+from rsc.methods.metrics import is_recovered
 from rsc.methods.nn import NNBaseline
 from methods_helpers import make_task
 
@@ -38,7 +39,10 @@ def test_huge_integer_power_does_not_hang():
 def test_r2_edge_cases():
     assert r2([1, 2, 3], [1, 2, 3]) == pytest.approx(1.0)
     assert r2([1, 2, 3], [1, np.nan, 3]) == float("-inf")
-    assert r2([1, 1, 1], [1, 1, 1]) == 1.0 and not np.isnan(r2([1, 1, 1], [2, 2, 2]))
+    # constant target: undefined under the canonical policy (metrics.py), never a perfect score
+    for pred in ([1, 1, 1], [2, 2, 2]):
+        v = r2([1, 1, 1], pred)
+        assert v != 1.0 and not is_recovered(v)
 
 
 def test_task_has_no_ground_truth_field():

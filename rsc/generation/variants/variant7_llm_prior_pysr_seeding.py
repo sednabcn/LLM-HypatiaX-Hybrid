@@ -49,6 +49,11 @@ import re
 import numpy as np
 from itertools import combinations_with_replacement
 
+try:
+    from rsc.methods.metrics import r2 as _canonical_r2, selection_score as _selection_score
+except ImportError:  # running from inside rsc/
+    from methods.metrics import r2 as _canonical_r2, selection_score as _selection_score
+
 
 # ── honest substitute #1: LLM prior (real call: hypatia.get_llm_prior) ──
 def mock_llm_prior(eq: dict, X: np.ndarray, y: np.ndarray, n_candidates: int = 5) -> list[str]:
@@ -143,9 +148,8 @@ def greedy_feature_search(X: np.ndarray, y: np.ndarray, var_names: list[str],
         remaining_y = remaining_y - best_coef * library[best_name]
 
     pred_total = y - remaining_y
-    ss_res = float(np.sum((y - pred_total) ** 2))
-    ss_tot = float(np.sum((y - y.mean()) ** 2))
-    r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 1.0
+    # canonical evaluator: NaN for a degenerate (constant) target, -inf for a bad prediction
+    r2 = _canonical_r2(y, pred_total)
     return {"expr": " + ".join(selected) or "0", "r2": r2, "seeded_terms_used": [s for s in selected if guesses and s in guesses]}
 
 
@@ -185,7 +189,7 @@ def run_seeded_vs_unseeded(eq: dict, X: np.ndarray, y: np.ndarray,
         "llm_candidates_seeded": len(guesses),
         "H_seeded":   result_h,
         "P_unseeded": result_p,
-        "H_beat_P": result_h["r2"] > result_p["r2"],
+        "H_beat_P": _selection_score(result_h["r2"]) > _selection_score(result_p["r2"]),
     }
 
 
