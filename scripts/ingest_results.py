@@ -45,6 +45,21 @@ def fnum(x):
     except (TypeError, ValueError):
         return None
 
+def is_catastrophic(raw):
+    """Catastrophic far-R2, judged on the RAW value (before fnum drops non-finite values).
+
+    fnum() maps -inf/NaN to None, so a check on its output silently skips the worst failures
+    and undercounts the catastrophic rate.  A missing value (None / unparseable) is NOT
+    catastrophic -- it is counted separately as r2_far_missing.  +inf is not catastrophic.
+    """
+    if raw is None:
+        return False
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return False
+    return math.isnan(v) or v == -math.inf or v < -1.0
+
 def version_tuple(v):
     m = re.search(r"(\d+)\.(\d+)", str(v or ""))
     return (int(m.group(1)), int(m.group(2))) if m else None
@@ -91,7 +106,8 @@ def ingest_file(con, path, exp_id, split, table, stats, allow_synth):
                 stats["rejected_pre_v5"] += 1
                 continue
             ok = bool(res.get("success", True))
-            r2f = fnum(pick(res, "r2_far"))
+            r2f_raw = pick(res, "r2_far")
+            r2f = fnum(r2f_raw)
             if r2f is None and ok and res.get("r2") is not None:
                 stats["r2_far_missing"] += 1
             r2t = fnum(pick(res, "r2_test"))
@@ -104,7 +120,9 @@ def ingest_file(con, path, exp_id, split, table, stats, allow_synth):
                  pick(res, "decision"), split, int(synthetic)))
             rid = cur.lastrowid
             np_ = int(r2f is not None and r2f > 0.99)
-            cat = int(r2f is not None and r2f < -1.0)
+            cat = int(is_catastrophic(r2f_raw))     # raw value: -inf / NaN count as catastrophic
+            if cat and r2f is None:
+                stats["catastrophic_nonfinite"] += 1
             con.execute("INSERT OR REPLACE INTO result(run_id,r2_train,r2_test_in,r2_far,extrap_tier,rmse,mae,near_perfect,catastrophic,expr)"
                         " VALUES(?,?,?,?,?,?,?,?,?,?)",
                         (rid, r2, r2t, r2f, pick(res, "tier"), fnum(pick(res, "rmse")), fnum(pick(res, "mae")), np_, cat,
