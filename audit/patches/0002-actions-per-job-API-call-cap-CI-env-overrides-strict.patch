@@ -1,0 +1,318 @@
+From 9a9c3026257aa63e50a53bec8832c69072f0e6bc Mon Sep 17 00:00:00 2001
+From: Claude Code agent <noreply@anthropic.com>
+Date: Tue, 13 Oct 2026 08:42:26 +0100
+Subject: [PATCH] actions: per-job API call cap, CI env overrides, strict
+ smoke, methods workflow
+
+- config/api_env.yml + env.py + llm.py: max_calls cap (no prices needed); HX_MAX_CALLS / HX_API_MODE / HX_BUDGET_USD
+  override per job so each Actions job sets its own share
+- smoke.py: --strict (implies live; refuses mock LLM / substitute search / sklearn NN; exit 1 on any variant error)
+- .github/workflows/methods.yml: tests on PR/agent branches without secrets; live smoke by manual dispatch behind
+  environment anthropic-live, key visible to a single step only
+- README / PROCESS_LOG / PROJECT_STATE: decision 0.4 (runs in GitHub Actions), sharding and budget rules
+
+Workflow was YAML-parsed and checked for secret scoping only; it has not been run on GitHub.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_0179Zi1taaxY8ctAudrKpVj8
+---
+ .github/workflows/methods.yml              | 63 ++++++++++++++++++++++
+ PROCESS_LOG.md                             |  1 +
+ PROJECT_STATE.md                           |  3 +-
+ config/api_env.yml                         |  4 ++
+ rsc/experiments/tests/test_methods_core.py | 29 ++++++++++
+ rsc/methods/README.md                      | 17 ++++++
+ rsc/methods/env.py                         | 13 ++++-
+ rsc/methods/llm.py                         |  4 +-
+ rsc/methods/smoke.py                       | 14 +++--
+ 9 files changed, 141 insertions(+), 7 deletions(-)
+ create mode 100644 .github/workflows/methods.yml
+
+diff --git a/.github/workflows/methods.yml b/.github/workflows/methods.yml
+new file mode 100644
+index 0000000..d824b58
+--- /dev/null
++++ b/.github/workflows/methods.yml
+@@ -0,0 +1,63 @@
++name: methods
++# rsc/methods: tests on every PR / agent branch (NO secrets), and an opt-in LIVE smoke (real LLM + real PySR + torch).
++# Real experiment runs are NOT in this file: they need scripts/run_hybrid_all.sh and ci_runner_hybrid.yml, which are not in the tree
++# this workflow was written against. See "Running in GitHub Actions" in rsc/methods/README.md for the sharding / budget rules.
++on:
++  pull_request:
++    paths: ["rsc/**", "config/**", "requirements.txt", ".github/workflows/methods.yml"]
++  push:
++    branches: ["agent/**"]
++    paths: ["rsc/**", "config/**", "requirements.txt", ".github/workflows/methods.yml"]
++  workflow_dispatch:
++    inputs:
++      live_smoke:
++        description: "Run the live smoke (spends API calls)"
++        type: boolean
++        default: false
++      max_calls:
++        description: "Hard cap on API calls for this job"
++        type: string
++        default: "40"
++
++permissions:
++  contents: read
++
++jobs:
++  tests:
++    runs-on: ubuntu-latest
++    timeout-minutes: 15
++    steps:
++      - uses: actions/checkout@v4
++      - uses: actions/setup-python@v5
++        with: {python-version: "3.11", cache: pip}
++      - run: pip install -r requirements.txt
++      - run: make test
++
++  live-smoke:
++    # Manual only, after the tests pass, and gated by the `anthropic-live` environment (add required reviewers there):
++    # fork PRs and ordinary pushes can never reach the secret or spend money.
++    if: github.event_name == 'workflow_dispatch' && inputs.live_smoke
++    needs: tests
++    runs-on: ubuntu-latest
++    timeout-minutes: 90
++    environment: anthropic-live
++    env:
++      HX_API_MODE: live                    # missing key = error, never a silent mock
++      HX_MAX_CALLS: ${{ inputs.max_calls }}
++      PYSR_POPULATIONS: "2"                # smoke budget from config/experiments.yml (200 generations)
++      PYSR_GENERATIONS: "200"
++    steps:
++      - uses: actions/checkout@v4
++      - uses: actions/setup-python@v5
++        with: {python-version: "3.11", cache: pip}
++      - uses: julia-actions/setup-julia@v2
++        with: {version: "1.10"}
++      - run: pip install -r requirements.txt anthropic pysr
++      - run: pip install torch --index-url https://download.pytorch.org/whl/cpu
++      - name: strict live smoke (fails on mock LLM, substitute search, sklearn NN, or any variant error)
++        env:
++          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}   # only this step sees the key
++        run: python -m rsc.methods.smoke --strict | tee smoke.log
++      - uses: actions/upload-artifact@v4
++        if: always()
++        with: {name: methods-smoke-log, path: smoke.log}
+diff --git a/PROCESS_LOG.md b/PROCESS_LOG.md
+index 1ca7799..4b6cf32 100644
+--- a/PROCESS_LOG.md
++++ b/PROCESS_LOG.md
+@@ -4,3 +4,4 @@ One line per finished step: `date | playbook step | minutes | what you did | wha
+ 2026-10-10 | 1.1 | - | case validator + tests added by the agent | validator cannot see generator-level input correlation (moved to 5.3)
+ 2026-10-12 | 1.1 | - | validator rebuilt (earlier copy was not in LLM-HypatiaX-Hybrid.zip: scripts/ cases/ rsc/ were empty) + 27 planted-defect tests + P1 schema header | PyYAML reads 1.0e6 as a string (needs 1.0e+6): custom loader added; random sampling misses poles: dense scan + near-singular warning added (cannot tell a pole from steep growth, so it is a warning)
+ 2026-10-12 | 5 (methods layer) | - | agent refactor: baselines + V1-V7 on one stack (rsc/methods), config/api_env.yml, optional RAG, row adapter; 136 new tests in rsc/experiments/tests | GUIDE step 0 gate says '8 passed' but the baseline is 27 (now 163 + 1 skip without config/variants.yml); DESIGN.md and the standalone scripts disagree on V1 gate and V3 weighting (F1, F2); V5 documented seeds make 5-seed sweeps identical (F3); scripts/ingest_results.py not in the zip so row field names are unconfirmed
++2026-10-13 | 0.4 (partial) | - | decision recorded: all runs in GitHub Actions. Agent added HX_MAX_CALLS / HX_API_MODE / HX_BUDGET_USD overrides, a per-process API call cap (no prices needed), `smoke --strict`, .github/workflows/methods.yml (tests on PR without secrets; live smoke by manual dispatch behind environment anthropic-live) | I had planned for 'your machine' (my mistake: 0.4 was open); 6 h job limit forces sharding; no shared budget counter across jobs; workflow never run on GitHub
+diff --git a/PROJECT_STATE.md b/PROJECT_STATE.md
+index a9fc10c..8b9dcb5 100644
+--- a/PROJECT_STATE.md
++++ b/PROJECT_STATE.md
+@@ -1,6 +1,6 @@
+ ---
+ step: "Phase 1 done (validator + tests); methods layer proposed on agent/variants-refactor (review pending); waiting on 1.2 schema approval and Phase 0 decisions"
+-next_action: "Approve or change the schema in cases/P1_market_risk.yml header (1.2); then decide 0.1-0.4 in config/variants.yml and config/anchor.yml; review findings F1-F7 in rsc/methods/README.md and log them in audit/issues/issues.yml"
++next_action: "Approve or change the schema in cases/P1_market_risk.yml header (1.2); then decide 0.1-0.3 and the 0.4 budget number (runs: GitHub Actions, decided 2026-10-13) in config/variants.yml and config/anchor.yml; review findings F1-F7 in rsc/methods/README.md and log them in audit/issues/issues.yml"
+ blockers: [A-016, A-014, A-006, A-007, A-012, A-020]
+ updated: 2026-10-12
+ ---
+@@ -15,6 +15,7 @@ The YAML header above is machine-read by `scripts/export_state.py` -> `docs/stat
+ - Update `step`, `next_action`, `blockers`, `updated` at the end of every session.
+ 
+ ## Log
++- 2026-10-13: decision 0.4 (where): all runs in GitHub Actions. Branch `agent/actions-runs` (on top of `agent/variants-refactor`): per-job call cap and env overrides, `smoke --strict`, `.github/workflows/methods.yml` (live smoke is manual, behind environment `anthropic-live`). Never run on GitHub. Budget number still needed.
+ - 2026-10-12: agent branch `agent/variants-refactor`: rsc/methods (baselines + V1-V7 on one stack), config/api_env.yml, optional RAG, result-row adapter, tests in rsc/experiments/tests. Not run against real PySR / API / torch / ingest. Findings F1-F7 in rsc/methods/README.md await logging as issues.
+ - 2026-10-12: validator, tests and P1 schema header rebuilt in this zip (scripts/validate_cases.py). Bridge files (export_state.py, dashboard, workflows) are NOT in this zip; re-apply the patch if you still want them.
+ - 2026-10-09: added state export, Pages dashboard, issue sync, results-branch workflow.
+diff --git a/config/api_env.yml b/config/api_env.yml
+index ad26382..6341c64 100644
+--- a/config/api_env.yml
++++ b/config/api_env.yml
+@@ -37,4 +37,8 @@ max_retries: 3                         # transport-level retries (429 / 5xx), ha
+ budget_usd: null
+ price_usd_per_mtok: {input: null, output: null}
+ 
++# Hard cap on API calls PER PROCESS (needs no prices; cache hits do not count). In GitHub Actions every job is its own process,
++# so set each job's share with the env var HX_MAX_CALLS (overrides this value); HX_API_MODE and HX_BUDGET_USD override mode / budget_usd.
++max_calls: null
++
+ freeze_cache_env: HYPATIAX_LLM_FREEZE_CACHE   # path to a JSON cache: same (model, temperature, prompt) -> same text
+diff --git a/rsc/experiments/tests/test_methods_core.py b/rsc/experiments/tests/test_methods_core.py
+index d3ff093..7953ded 100644
+--- a/rsc/experiments/tests/test_methods_core.py
++++ b/rsc/experiments/tests/test_methods_core.py
+@@ -189,3 +189,32 @@ def test_nn_fits_and_seeds_differ():
+     a = NNBaseline("d", epochs=60, run_seed=1).fit(t.X, t.y).predict(t.X)
+     b = NNBaseline("d", epochs=60, run_seed=2).fit(t.X, t.y).predict(t.X)
+     assert r2(t.y, a) > 0.5 and not np.allclose(a, b)
++
++
++# ---------------------------------------------------------------- call cap + CI overrides
++def test_max_calls_stops_the_run_and_cache_hits_do_not_count():
++    c = LLMClient(_env(max_calls=2), client=FakeSDK())
++    c.complete("a"); c.complete("b")
++    with pytest.raises(BudgetExceeded, match="max_calls"):
++        c.complete("c")
++
++
++def test_ci_env_overrides(tmp_path, monkeypatch):
++    p = _write_cfg(tmp_path, "max_calls: 100\nmode: auto\n")
++    monkeypatch.setenv("HX_MAX_CALLS", "7"); monkeypatch.setenv("HX_API_MODE", "live")
++    env = ApiEnv.load(p)
++    assert env.max_calls == 7 and env.mode == "live" and env.public_dict()["max_calls"] == 7
++
++
++def test_invalid_max_calls_refused(tmp_path, monkeypatch):
++    monkeypatch.setenv("HX_MAX_CALLS", "0")
++    with pytest.raises(EnvError):
++        ApiEnv.load(_write_cfg(tmp_path))
++
++
++def test_strict_smoke_refuses_a_non_live_environment():
++    import os, subprocess, sys
++    from methods_helpers import ROOT
++    env = {k: v for k, v in os.environ.items() if not k.startswith("HX_") and k != "ANTHROPIC_API_KEY"}
++    r = subprocess.run([sys.executable, "-m", "rsc.methods.smoke", "--strict"], cwd=ROOT, env=env, capture_output=True, text=True)
++    assert r.returncode != 0 and "live" in (r.stderr + r.stdout)
+diff --git a/rsc/methods/README.md b/rsc/methods/README.md
+index 3461562..c40e4b5 100644
+--- a/rsc/methods/README.md
++++ b/rsc/methods/README.md
+@@ -77,3 +77,20 @@ containing the ground truth, and `audit_prompt_leak(prompt, gt_formula)` checks
+ The example KB has six generic textbook cards; a real KB needs its own curation and leak audit (PLAYBOOK rule 6 wording applies: "reduced by
+ construction and measured by a probe").
+ Not built, each is also an experiment change: self-consistency sampling, critique-and-repair, a units check (pint is already in installation.yml).
++
++## Running in GitHub Actions (decision 0.4: where = GitHub Actions, decided 2026-10-13; the budget NUMBER is still open)
++
++* **Key**: repository secret `ANTHROPIC_API_KEY`, attached to an Actions *environment* named `anthropic-live` with required reviewers.
++  Fork PRs get no secrets, and `methods.yml` only exposes the key inside the one step that needs it. The code never prints or stores it.
++* **Mode**: set `HX_API_MODE=live` in every real job: a missing key is then an error, never a silent mock.
++* **Budget**: one job = one process = its own cap. Set `HX_MAX_CALLS` per job (needs no prices; cache hits do not count). There is no counter
++  shared between jobs, so the total cap is (number of jobs) x (cap per job): derive it from the pilot's measured calls per case (T13), not from a guess.
++* **Time**: a GitHub-hosted job stops at 6 hours. My unmeasured estimate for the anchor was ~80 h+ (150 cases x 8 methods x 5 seeds x 2 splits);
++  if it holds, that is at least 14 jobs. Shard by (protocol, split, seed[, variant]) and size shards from the pilot's `wall_s`.
++  PySR runs `deterministic=True, parallelism="serial"` (pysr.py), so more CPUs on the runner do not speed up one search.
++* **Resume**: shards write result JSONs as artifacts, then push to `results/<run-id>` (docs/BRIDGE.md flow). Re-run only the failed shards.
++  Keep the LLM freeze cache (`HYPATIAX_LLM_FREEZE_CACHE`) in `actions/cache`, keyed per shard: a retried shard then replays identical LLM text for free.
++* **Smoke first**: Actions -> methods -> Run workflow -> `live_smoke: true`. It runs `python -m rsc.methods.smoke --strict`, which fails the job on a mock LLM,
++  the substitute search, an sklearn NN, or any variant error. Run it before any experiment shard (PLAYBOOK 6.1).
++* **Not built**: the real-run workflow. It needs `scripts/run_hybrid_all.sh` and `ci_runner_hybrid.yml`, which are not in the tree this was written against.
++  `.github/workflows/methods.yml` was only YAML-parsed and checked for secret scoping here, never run on GitHub.
+diff --git a/rsc/methods/env.py b/rsc/methods/env.py
+index 9478315..0460991 100644
+--- a/rsc/methods/env.py
++++ b/rsc/methods/env.py
+@@ -50,6 +50,7 @@ class ApiEnv:
+     timeout_s: float = 60.0
+     max_retries: int = 3
+     budget_usd: float | None = None
++    max_calls: int | None = None
+     price_in: float | None = None
+     price_out: float | None = None
+     freeze_cache_env: str = "HYPATIAX_LLM_FREEZE_CACHE"
+@@ -75,11 +76,19 @@ class ApiEnv:
+             timeout_s=float(raw.get("timeout_s", 60)),
+             max_retries=int(raw.get("max_retries", 3)),
+             budget_usd=raw.get("budget_usd"),
++            max_calls=raw.get("max_calls"),
+             price_in=price.get("input"),
+             price_out=price.get("output"),
+             freeze_cache_env=raw.get("freeze_cache_env", "HYPATIAX_LLM_FREEZE_CACHE"),
+             _root=path.resolve().parents[1] if path.is_file() else ROOT,
+         )
++        # Per-job overrides for CI: every Actions job sets its OWN share of the budget / mode without editing the file.
++        if os.environ.get("HX_API_MODE"):
++            env.mode = os.environ["HX_API_MODE"]
++        if os.environ.get("HX_MAX_CALLS"):
++            env.max_calls = int(os.environ["HX_MAX_CALLS"])
++        if os.environ.get("HX_BUDGET_USD"):
++            env.budget_usd = float(os.environ["HX_BUDGET_USD"])
+         env.validate()
+         return env
+ 
+@@ -88,6 +97,8 @@ class ApiEnv:
+             raise EnvError(f"mode must be auto|live|mock, got {self.mode!r}")
+         if self.provider != "anthropic":
+             raise EnvError(f"only provider=anthropic is implemented, got {self.provider!r}")
++        if self.max_calls is not None and self.max_calls < 1:
++            raise EnvError(f"max_calls must be >= 1, got {self.max_calls}")
+         if self.budget_usd is not None and (self.price_in is None or self.price_out is None):
+             raise EnvError("budget_usd is set but price_usd_per_mtok.input/output are null: "
+                            "fill in the prices from your console (they are not guessed here)")
+@@ -128,4 +139,4 @@ class ApiEnv:
+         """Safe to write into result rows / logs: never contains the key."""
+         return {"provider": self.provider, "model": self.model, "temperature": self.temperature,
+                 "strict_temperature": self.strict_temperature, "mode": self.mode,
+-                "max_tokens": self.max_tokens, "budget_usd": self.budget_usd}
++                "max_tokens": self.max_tokens, "budget_usd": self.budget_usd, "max_calls": self.max_calls}
+diff --git a/rsc/methods/llm.py b/rsc/methods/llm.py
+index b73301b..f45ab50 100644
+--- a/rsc/methods/llm.py
++++ b/rsc/methods/llm.py
+@@ -6,7 +6,7 @@ Changes vs the version you uploaded (everything else is kept):
+     RECORDS temperature_used=None, so a result row can never claim a temperature that was not applied
+   * the freeze-cache key now includes temperature and max_tokens (before, changing temperature
+     silently returned stale cached text)
+-  * token usage and optional USD budget are tracked; BudgetExceeded stops the run
++  * token usage, an optional USD budget and an optional max_calls cap (needs no prices) are tracked; BudgetExceeded stops the run
+   * a client can be injected (tests) and `meta()` returns what must be stored next to every result
+   * FixtureLLM: scripted answers for tests / smoke runs; MockLLM now returns the JSON format the parser expects
+ """
+@@ -117,6 +117,8 @@ class LLMClient(_Base):
+         return (self.tokens_in * self.env.price_in + self.tokens_out * self.env.price_out) / 1e6
+ 
+     def _check_budget(self) -> None:
++        if self.env.max_calls is not None and self.api_calls >= self.env.max_calls:
++            raise BudgetExceeded(f"{self.api_calls} API calls >= max_calls {self.env.max_calls} (cache hits do not count)")
+         if self.env.budget_usd is None:
+             return
+         c = self.cost_usd()
+diff --git a/rsc/methods/smoke.py b/rsc/methods/smoke.py
+index 155d725..e120edb 100644
+--- a/rsc/methods/smoke.py
++++ b/rsc/methods/smoke.py
+@@ -4,7 +4,7 @@ With no API key this uses the scripted fixture LLM and (without PySR) the substi
+ verify WIRING ONLY. They are not results and must never be compared with the paper.
+ """
+ from __future__ import annotations
+-import argparse
++import argparse, json, sys
+ import numpy as np
+ 
+ from .common import Task, r2, safe_predict
+@@ -27,20 +27,26 @@ def main():
+     ap = argparse.ArgumentParser()
+     ap.add_argument("--search", default="auto", choices=["auto", "pysr", "substitute"])
+     ap.add_argument("--live", action="store_true", help="use the LLM from config/api_env.yml instead of fixtures")
++    ap.add_argument("--strict", action="store_true",
++                    help="implies --live; refuse mock LLM / substitute search / sklearn NN and exit 1 on any error (for CI)")
+     a = ap.parse_args()
+     env = ApiEnv.load()
+-    llm = None if a.live else FixtureLLM({"default": [{"equation": "2*a + 0.4*b**2", "confidence": 0.7, "reasoning": "fixture"}]})
+-    stack = build_stack(env, search=a.search, llm=llm)
++    llm = None if (a.live or a.strict) else FixtureLLM({"default": [{"equation": "2*a + 0.4*b**2", "confidence": 0.7, "reasoning": "fixture"}]})
++    stack = build_stack(env, search=("pysr" if a.strict else a.search), llm=llm, strict=a.strict)
+     task, Xf, yf = synthetic_task()
+     print(f"llm={stack.llm.backend} search={stack.search.engine} nn={stack.provenance()['nn_backend']}  (WIRING CHECK, not results)")
+     print(f"{'variant':12s} {'decision':24s} {'train_r2':>9s} {'far_r2':>9s} {'llm':>4s} {'srch':>4s}")
++    errors = 0
+     for vid in REGISTRY:
+         try:
+             r = make(vid).run(task, stack)
+             print(f"{vid:12s} {r.decision:24s} {r.train_r2:9.4f} {r2(yf, safe_predict(r, Xf)):9.4f} {r.api_calls:4d} {r.search_calls:4d}")
+         except Exception as e:
++            errors += 1
+             print(f"{vid:12s} ERROR {type(e).__name__}: {e}")
++    print("provenance:", json.dumps(stack.provenance(), default=str))
++    return 1 if errors else 0
+ 
+ 
+ if __name__ == "__main__":
+-    main()
++    sys.exit(main())
+-- 
+2.43.0
+
