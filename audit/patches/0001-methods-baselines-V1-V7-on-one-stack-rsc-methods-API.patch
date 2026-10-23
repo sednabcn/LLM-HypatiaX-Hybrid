@@ -1,0 +1,2588 @@
+From 6b5b02724f7884887598f878a7cea94df54b37e2 Mon Sep 17 00:00:00 2001
+From: Claude Code agent <noreply@anthropic.com>
+Date: Tue, 13 Oct 2026 08:23:15 +0100
+Subject: [PATCH] methods: baselines + V1-V7 on one stack (rsc/methods), API
+ env config, optional RAG
+
+- rsc/methods: shared sandbox/Task/FitResult, one LLM client (llm.py patched), nn.py (+run_seed),
+  pysr.py unchanged, search adapter (real PySR / labelled substitute), build_stack(strict=True) for paper runs
+- variants B_LLM B_NN B_PYSR V1..V7 under the frozen ids of config/variants.yml; V5 seed default mirrors
+  the documented 42+attempt
+- config/api_env.yml: model, temperature policy, key variable name, mode, budget (no secrets)
+- rows.py: result row with comparability fields, r2_far recomputed, synthetic marker
+- optional RAG (OFF by default) with leak filter and prompt audit
+- tests in rsc/experiments/tests (136 new); Makefile target methods-smoke; PROCESS_LOG / PROJECT_STATE updated
+- findings F1-F7 in rsc/methods/README.md await logging as issues
+
+Not run against real PySR, the live API, torch or scripts/ingest_results.py.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_0179Zi1taaxY8ctAudrKpVj8
+---
+ .env.example                                  |   7 +
+ Makefile                                      |   6 +-
+ PROCESS_LOG.md                                |   1 +
+ PROJECT_STATE.md                              |   5 +-
+ config/api_env.yml                            |  40 ++++
+ config/formula_kb.example.yml                 |  16 ++
+ rsc/experiments/tests/methods_helpers.py      |  26 ++
+ rsc/experiments/tests/test_methods_core.py    | 191 +++++++++++++++
+ rsc/experiments/tests/test_methods_rag.py     |  61 +++++
+ rsc/experiments/tests/test_methods_rows.py    |  76 ++++++
+ .../tests/test_methods_variants.py            | 222 ++++++++++++++++++
+ rsc/methods/README.md                         |  79 +++++++
+ rsc/methods/__init__.py                       |   0
+ rsc/methods/common.py                         | 159 +++++++++++++
+ rsc/methods/env.py                            | 131 +++++++++++
+ rsc/methods/hypotheses.py                     |  72 ++++++
+ rsc/methods/llm.py                            | 167 +++++++++++++
+ rsc/methods/nn.py                             |  62 +++++
+ rsc/methods/pysr.py                           |  27 +++
+ rsc/methods/retrieval.py                      |  90 +++++++
+ rsc/methods/rows.py                           |  60 +++++
+ rsc/methods/search.py                         | 117 +++++++++
+ rsc/methods/smoke.py                          |  46 ++++
+ rsc/methods/stack.py                          |  58 +++++
+ rsc/methods/variants/__init__.py              |  27 +++
+ rsc/methods/variants/base.py                  |  39 +++
+ rsc/methods/variants/baselines.py             |  39 +++
+ rsc/methods/variants/gates.py                 | 114 +++++++++
+ rsc/methods/variants/search_variants.py       | 202 ++++++++++++++++
+ rsc/methods/variants/validation_selected.py   | 165 +++++++++++++
+ 30 files changed, 2301 insertions(+), 4 deletions(-)
+ create mode 100644 .env.example
+ create mode 100644 config/api_env.yml
+ create mode 100644 config/formula_kb.example.yml
+ create mode 100644 rsc/experiments/tests/methods_helpers.py
+ create mode 100644 rsc/experiments/tests/test_methods_core.py
+ create mode 100644 rsc/experiments/tests/test_methods_rag.py
+ create mode 100644 rsc/experiments/tests/test_methods_rows.py
+ create mode 100644 rsc/experiments/tests/test_methods_variants.py
+ create mode 100644 rsc/methods/README.md
+ create mode 100644 rsc/methods/__init__.py
+ create mode 100644 rsc/methods/common.py
+ create mode 100644 rsc/methods/env.py
+ create mode 100644 rsc/methods/hypotheses.py
+ create mode 100644 rsc/methods/llm.py
+ create mode 100644 rsc/methods/nn.py
+ create mode 100644 rsc/methods/pysr.py
+ create mode 100644 rsc/methods/retrieval.py
+ create mode 100644 rsc/methods/rows.py
+ create mode 100644 rsc/methods/search.py
+ create mode 100644 rsc/methods/smoke.py
+ create mode 100644 rsc/methods/stack.py
+ create mode 100644 rsc/methods/variants/__init__.py
+ create mode 100644 rsc/methods/variants/base.py
+ create mode 100644 rsc/methods/variants/baselines.py
+ create mode 100644 rsc/methods/variants/gates.py
+ create mode 100644 rsc/methods/variants/search_variants.py
+ create mode 100644 rsc/methods/variants/validation_selected.py
+
+diff --git a/.env.example b/.env.example
+new file mode 100644
+index 0000000..ba908f1
+--- /dev/null
++++ b/.env.example
+@@ -0,0 +1,7 @@
++# Normally you just `export ANTHROPIC_API_KEY=...`. Use a .env file only after adding `.env` to .gitignore
++# AND setting `dotenv: .env` in config/api_env.yml. Never commit the real key.
++ANTHROPIC_API_KEY=
++# ANTHROPIC_BASE_URL=
++# HYPATIAX_LLM_FREEZE_CACHE=runs/llm_cache.json
++# PYSR_POPULATIONS=2
++# PYSR_GENERATIONS=500
+diff --git a/Makefile b/Makefile
+index 8337dcd..d419035 100644
+--- a/Makefile
++++ b/Makefile
+@@ -1,9 +1,9 @@
+ # One-command flows. `make dryrun` proves the plumbing on SYNTHETIC data; `make real` is the only path to paper numbers.
+ PY ?= python3
+ RESULTS ?= results
+-.PHONY: cases test dryrun real paper paper-dryrun refs audit clean help
++.PHONY: cases test dryrun real paper paper-dryrun refs audit clean help methods-smoke
+ help:
+-	@echo "make test | dryrun | real RESULTS=<dir> | refs | audit | clean"
++	@echo "make test | dryrun | real RESULTS=<dir> | refs | audit | methods-smoke | clean"
+ cases:                        ## validate case files (expected to fail until P1 has 30 verified cases)
+ 	$(PY) scripts/validate_cases.py
+ test:
+@@ -28,5 +28,7 @@ refs:                         ## needs internet (Crossref/arXiv)
+ 	$(PY) scripts/validate_refs.py paper/references.bib --fix --strict
+ audit:
+ 	$(PY) rsc/experiments/analytics/audit_checks.py
++methods-smoke:                ## wiring check of rsc/methods on one synthetic task: prints only, writes nothing, NOT results
++	$(PY) -m rsc.methods.smoke
+ clean:
+ 	cd paper && latexmk -C >/dev/null 2>&1; rm -rf _dryrun; rm -f rsc/db/results_dryrun.sqlite
+diff --git a/PROCESS_LOG.md b/PROCESS_LOG.md
+index 92d045f..1ca7799 100644
+--- a/PROCESS_LOG.md
++++ b/PROCESS_LOG.md
+@@ -3,3 +3,4 @@ One line per finished step: `date | playbook step | minutes | what you did | wha
+ 
+ 2026-10-10 | 1.1 | - | case validator + tests added by the agent | validator cannot see generator-level input correlation (moved to 5.3)
+ 2026-10-12 | 1.1 | - | validator rebuilt (earlier copy was not in LLM-HypatiaX-Hybrid.zip: scripts/ cases/ rsc/ were empty) + 27 planted-defect tests + P1 schema header | PyYAML reads 1.0e6 as a string (needs 1.0e+6): custom loader added; random sampling misses poles: dense scan + near-singular warning added (cannot tell a pole from steep growth, so it is a warning)
++2026-10-12 | 5 (methods layer) | - | agent refactor: baselines + V1-V7 on one stack (rsc/methods), config/api_env.yml, optional RAG, row adapter; 136 new tests in rsc/experiments/tests | GUIDE step 0 gate says '8 passed' but the baseline is 27 (now 163 + 1 skip without config/variants.yml); DESIGN.md and the standalone scripts disagree on V1 gate and V3 weighting (F1, F2); V5 documented seeds make 5-seed sweeps identical (F3); scripts/ingest_results.py not in the zip so row field names are unconfirmed
+diff --git a/PROJECT_STATE.md b/PROJECT_STATE.md
+index d866fc7..a9fc10c 100644
+--- a/PROJECT_STATE.md
++++ b/PROJECT_STATE.md
+@@ -1,6 +1,6 @@
+ ---
+-step: "Phase 1 done (validator + tests); waiting on 1.2 schema approval and Phase 0 decisions"
+-next_action: "Approve or change the schema in cases/P1_market_risk.yml header (1.2); then decide 0.1-0.4 in config/variants.yml and config/anchor.yml"
++step: "Phase 1 done (validator + tests); methods layer proposed on agent/variants-refactor (review pending); waiting on 1.2 schema approval and Phase 0 decisions"
++next_action: "Approve or change the schema in cases/P1_market_risk.yml header (1.2); then decide 0.1-0.4 in config/variants.yml and config/anchor.yml; review findings F1-F7 in rsc/methods/README.md and log them in audit/issues/issues.yml"
+ blockers: [A-016, A-014, A-006, A-007, A-012, A-020]
+ updated: 2026-10-12
+ ---
+@@ -15,5 +15,6 @@ The YAML header above is machine-read by `scripts/export_state.py` -> `docs/stat
+ - Update `step`, `next_action`, `blockers`, `updated` at the end of every session.
+ 
+ ## Log
++- 2026-10-12: agent branch `agent/variants-refactor`: rsc/methods (baselines + V1-V7 on one stack), config/api_env.yml, optional RAG, result-row adapter, tests in rsc/experiments/tests. Not run against real PySR / API / torch / ingest. Findings F1-F7 in rsc/methods/README.md await logging as issues.
+ - 2026-10-12: validator, tests and P1 schema header rebuilt in this zip (scripts/validate_cases.py). Bridge files (export_state.py, dashboard, workflows) are NOT in this zip; re-apply the patch if you still want them.
+ - 2026-10-09: added state export, Pages dashboard, issue sync, results-branch workflow.
+diff --git a/config/api_env.yml b/config/api_env.yml
+new file mode 100644
+index 0000000..ad26382
+--- /dev/null
++++ b/config/api_env.yml
+@@ -0,0 +1,40 @@
++# config/api_env.yml -- the ONE place the API environment is defined.
++# Secrets are never stored here: this file only names the environment variable that holds the key.
++#
++# The key is read from the process environment variable named by api_key_env (export it in your shell / CI secret).
++# The key is never printed, logged, cached or written to result rows.
++
++provider: anthropic
++api_key_env: ANTHROPIC_API_KEY        # name of the env var holding the key
++base_url_env: ANTHROPIC_BASE_URL      # optional env var; leave unset to use the default endpoint
++# Optional KEY=VALUE file, OFF by default. The repo's .gitignore does not list .env, so only set this to `.env`
++# after adding `.env` to .gitignore, otherwise a key can be committed by accident.
++dotenv: null
++
++# mode:
++#   live  -> real API calls; a missing key is an ERROR (use this for every anchor/paper run)
++#   mock  -> offline deterministic stand-in; results are NOT scientific results
++#   auto  -> live if a key is present, else mock (convenient for development ONLY)
++mode: auto
++
++# UNRESOLVED (decision 0.3): model_config.yml says claude-sonnet-5-5 / temperature 0,
++# anchor.yml says claude-sonnet-5 / 0.25. This file holds the values the code actually uses;
++# edit them here and delete the `llm:` block from model_config.yml so there is one source.
++model: claude-sonnet-5-5
++temperature: 0.0
++# If the model rejects `temperature`:
++#   true  -> raise (the run stops; nothing is silently different from what the config says)
++#   false -> retry without it and RECORD temperature_used=null in every result row
++strict_temperature: true
++
++max_tokens: 1500
++timeout_s: 60
++max_retries: 3                         # transport-level retries (429 / 5xx), handled by the SDK
++
++# Hard spend cap. Enforcement needs prices, and prices are not invented here:
++# fill in the current USD-per-million-token prices for your model from your Anthropic console,
++# then set budget_usd. If budget_usd is set while a price is null the loader refuses to start.
++budget_usd: null
++price_usd_per_mtok: {input: null, output: null}
++
++freeze_cache_env: HYPATIAX_LLM_FREEZE_CACHE   # path to a JSON cache: same (model, temperature, prompt) -> same text
+diff --git a/config/formula_kb.example.yml b/config/formula_kb.example.yml
+new file mode 100644
+index 0000000..62639b8
+--- /dev/null
++++ b/config/formula_kb.example.yml
+@@ -0,0 +1,16 @@
++# EXAMPLE knowledge base -- generic textbook relations only, to show the format and run the tests.
++# NOT for anchor / paper runs: a real KB must be built so that no card equals or contains any benchmark
++# ground-truth formula (retrieval.view_for_case + audit_prompt_leak enforce and verify that).
++cards:
++  - {id: kb_ideal_gas, name: Ideal gas law, domain: physics, formula: "n*R*T/V", variables: [n, R, T, V],
++     description: "pressure of an ideal gas from amount, temperature and volume", source: textbook}
++  - {id: kb_kinetic_energy, name: Kinetic energy, domain: physics, formula: "0.5*m*v**2", variables: [m, v],
++     description: "energy of a moving mass", source: textbook}
++  - {id: kb_ohm, name: Ohm's law, domain: physics, formula: "V/R", variables: [V, R],
++     description: "current through a resistor from voltage and resistance", source: textbook}
++  - {id: kb_compound, name: Compound interest, domain: finance, formula: "P*(1+r/n)**(n*t)", variables: [P, r, n, t],
++     description: "balance after compounding interest n times per year", source: textbook}
++  - {id: kb_present_value, name: Present value, domain: finance, formula: "FV/(1+r)**t", variables: [FV, r, t],
++     description: "discounted value of a future cash flow", source: textbook}
++  - {id: kb_michaelis, name: Michaelis-Menten rate, domain: biology, formula: "Vmax*S/(Km+S)", variables: [Vmax, S, Km],
++     description: "enzyme reaction rate saturating with substrate concentration", source: textbook}
+diff --git a/rsc/experiments/tests/methods_helpers.py b/rsc/experiments/tests/methods_helpers.py
+new file mode 100644
+index 0000000..29cbef1
+--- /dev/null
++++ b/rsc/experiments/tests/methods_helpers.py
+@@ -0,0 +1,26 @@
++"""Shared helpers for the test_methods_*.py tests (imported by name; pytest puts this directory on sys.path)."""
++import pathlib
++import sys
++
++ROOT = pathlib.Path(__file__).resolve().parents[3]
++if str(ROOT) not in sys.path:
++    sys.path.insert(0, str(ROOT))            # makes `import rsc.methods` work without installing anything
++
++import numpy as np  # noqa: E402
++
++from rsc.methods.common import Task  # noqa: E402
++from rsc.methods.env import ApiEnv  # noqa: E402
++from rsc.methods.llm import FixtureLLM  # noqa: E402
++from rsc.methods.stack import build_stack  # noqa: E402
++
++
++def make_task(fn=lambda X: 4.0 * X[:, 0], n=80, names=("x",), seed=42, case_id="t", Xfar=None):
++    rng = np.random.default_rng(0)
++    X = rng.uniform(1, 5, (n, len(names)))
++    return Task(X, fn(X), list(names), "test relation", seed=seed, case_id=case_id, X_test_features=Xfar)
++
++
++def stack_with(equations, **kw):
++    """Stack whose LLM always answers with `equations` (list of strings) -- or [] for 'no answer'."""
++    fx = [{"equation": e, "confidence": 0.5, "reasoning": ""} for e in equations]
++    return build_stack(ApiEnv(), search="substitute", llm=FixtureLLM({"default": fx}), **kw)
+diff --git a/rsc/experiments/tests/test_methods_core.py b/rsc/experiments/tests/test_methods_core.py
+new file mode 100644
+index 0000000..d3ff093
+--- /dev/null
++++ b/rsc/experiments/tests/test_methods_core.py
+@@ -0,0 +1,191 @@
++import json, time
++import numpy as np
++import pytest
++
++from rsc.methods import common
++from rsc.methods.common import Task, EquationError, predict_from_equation, try_predict, equation_ok, r2
++from rsc.methods.env import ApiEnv, EnvError
++from rsc.methods.llm import LLMClient, MockLLM, BudgetExceeded, TemperatureRejected
++from rsc.methods.nn import NNBaseline
++from methods_helpers import make_task
++
++
++# ---------------------------------------------------------------- sandbox
++@pytest.mark.parametrize("bad", ["__import__('os')", "().__class__", "open('x')", "x.real", "[1,2]", "'a'", "lambda: 1"])
++def test_sandbox_rejects(bad):
++    with pytest.raises(EquationError):
++        predict_from_equation(bad, np.ones((2, 1)), ["x"])
++
++
++def test_syntax_error_is_equation_error_not_syntaxerror():
++    # the standalone scripts only caught ValueError; SyntaxError escaped and crashed the whole run
++    with pytest.raises(EquationError):
++        predict_from_equation("x +", np.ones((2, 1)), ["x"])
++    assert try_predict("x +", np.ones((2, 1)), ["x"]) is None
++
++
++def test_unknown_name_is_none_not_crash():
++    assert try_predict("foo*2", np.ones((2, 1)), ["x"]) is None
++    assert not equation_ok("foo*2", ["x"])
++
++
++def test_huge_integer_power_does_not_hang():
++    t0 = time.time()
++    assert try_predict("9**9**9", np.ones((2, 1)), ["x"]) is None
++    assert time.time() - t0 < 2.0
++
++
++def test_r2_edge_cases():
++    assert r2([1, 2, 3], [1, 2, 3]) == pytest.approx(1.0)
++    assert r2([1, 2, 3], [1, np.nan, 3]) == float("-inf")
++    assert r2([1, 1, 1], [1, 1, 1]) == 1.0 and not np.isnan(r2([1, 1, 1], [2, 2, 2]))
++
++
++def test_task_has_no_ground_truth_field():
++    names = set(Task.__dataclass_fields__)
++    assert not any(k in names for k in ("formula", "gt", "ground_truth", "gt_formula", "y_test"))
++
++
++def test_task_shape_validation():
++    with pytest.raises(ValueError):
++        Task(np.ones((3, 2)), np.ones(3), ["a"], "d")
++
++
++# ---------------------------------------------------------------- env
++def _write_cfg(tmp_path, extra=""):
++    (tmp_path / "config").mkdir()
++    p = tmp_path / "config" / "api_env.yml"
++    p.write_text("provider: anthropic\napi_key_env: MY_KEY\ndotenv: .env\n" + extra)
++    return p
++
++
++def test_env_key_from_environ_then_dotenv(tmp_path, monkeypatch):
++    p = _write_cfg(tmp_path)
++    monkeypatch.delenv("MY_KEY", raising=False)
++    env = ApiEnv.load(p)
++    assert env.api_key({}) is None
++    (tmp_path / ".env").write_text('# c\nMY_KEY="from-dotenv"\n')
++    assert env.api_key({}) == "from-dotenv"
++    assert env.api_key({"MY_KEY": "from-env"}) == "from-env"
++
++
++def test_env_modes(tmp_path):
++    p = _write_cfg(tmp_path, "mode: live\n")
++    env = ApiEnv.load(p)
++    with pytest.raises(EnvError):
++        env.resolved_mode({})
++    assert env.resolved_mode({"MY_KEY": "k"}) == "live"
++    env.mode = "auto"
++    assert env.resolved_mode({}) == "mock" and env.resolved_mode({"MY_KEY": "k"}) == "live"
++    env.mode = "mock"
++    assert env.resolved_mode({"MY_KEY": "k"}) == "mock"
++
++
++def test_budget_without_prices_refused(tmp_path):
++    with pytest.raises(EnvError):
++        ApiEnv.load(_write_cfg(tmp_path, "budget_usd: 5\n"))
++
++
++def test_public_dict_never_contains_key(tmp_path):
++    env = ApiEnv.load(_write_cfg(tmp_path))
++    assert "k-secret" not in json.dumps(env.public_dict()) and "k-secret" not in repr(env)
++
++
++def test_default_config_loads():
++    env = ApiEnv.load()
++    assert env.model and env.mode in ("auto", "live", "mock")
++
++
++# ---------------------------------------------------------------- llm client (fake SDK client)
++class _Block:
++    type = "text"
++    def __init__(self, t): self.text = t
++
++
++class _Resp:
++    def __init__(self, text="[]", i=100, o=50):
++        self.content = [_Block(text)]
++        self.usage = type("U", (), {"input_tokens": i, "output_tokens": o})()
++
++
++class FakeSDK:
++    def __init__(self, reject_temperature=False):
++        self.reject, self.calls = reject_temperature, []
++        self.messages = self
++
++    def create(self, **kw):
++        self.calls.append(kw)
++        if self.reject and "temperature" in kw:
++            raise RuntimeError("`temperature` is deprecated for this model")
++        return _Resp()
++
++
++def _env(**kw):
++    e = ApiEnv(); [setattr(e, k, v) for k, v in kw.items()]; return e
++
++
++def test_temperature_rejected_strict_raises():
++    c = LLMClient(_env(strict_temperature=True), client=FakeSDK(True))
++    with pytest.raises(TemperatureRejected):
++        c.complete("p")
++
++
++def test_temperature_rejected_lenient_records_drop():
++    sdk = FakeSDK(True)
++    c = LLMClient(_env(strict_temperature=False), client=sdk)
++    c.complete("p")
++    m = c.meta()
++    assert m["temperature_used"] is None and m["temperature_dropped"] and m["temperature_requested"] == 0.0
++    assert "temperature" not in sdk.calls[-1]
++
++
++def test_unrelated_error_is_not_swallowed():
++    class Boom(FakeSDK):
++        def create(self, **kw): raise RuntimeError("rate limit")
++    with pytest.raises(RuntimeError, match="rate limit"):
++        LLMClient(_env(), client=Boom()).complete("p")
++
++
++def test_budget_stops_the_run():
++    c = LLMClient(_env(budget_usd=0.0001, price_in=10.0, price_out=30.0), client=FakeSDK())
++    c.complete("a")                       # 100*10/1e6 + 50*30/1e6 = 0.0025 > budget
++    with pytest.raises(BudgetExceeded):
++        c.complete("b")
++
++
++def test_cache_key_includes_temperature(tmp_path):
++    path = str(tmp_path / "c.json")
++    class E(ApiEnv):
++        def freeze_cache_path(self, environ=None): return path
++    def mk(temp):
++        e = E(); e.temperature = temp
++        return LLMClient(e, client=FakeSDK())
++    a = mk(0.0); a.complete("same prompt"); a.complete("same prompt")
++    assert a.api_calls == 1 and a.cache_hits == 1
++    b = mk(0.5); b.complete("same prompt")            # different temperature must NOT hit the stale entry
++    assert b.api_calls == 1 and b.cache_hits == 0
++
++
++def test_mock_is_deterministic_and_parses():
++    from rsc.methods.hypotheses import parse_hypotheses, build_prompt
++    t = make_task(names=("a", "b"), fn=lambda X: X[:, 0] * X[:, 1])
++    m = MockLLM()
++    p = build_prompt(t)
++    assert m.complete(p) == m.complete(p) and m.api_calls == 2
++    assert parse_hypotheses(m.complete(p))[0].equation.endswith("*a*b")
++
++
++# ---------------------------------------------------------------- nn seed
++def test_nn_run_seed_changes_seed_and_default_is_backward_compatible():
++    from rsc.methods.nn import seed_from
++    assert NNBaseline("d").seed == seed_from("d")                 # old behaviour unchanged
++    assert NNBaseline("d", run_seed=99).seed != NNBaseline("d", run_seed=42).seed
++    assert NNBaseline("d", hidden=64).widths == (64, 64)
++    assert NNBaseline("d", hidden=(8, 4)).widths == (8, 4)
++
++
++def test_nn_fits_and_seeds_differ():
++    t = make_task(fn=lambda X: X[:, 0] ** 2, n=60)
++    a = NNBaseline("d", epochs=60, run_seed=1).fit(t.X, t.y).predict(t.X)
++    b = NNBaseline("d", epochs=60, run_seed=2).fit(t.X, t.y).predict(t.X)
++    assert r2(t.y, a) > 0.5 and not np.allclose(a, b)
+diff --git a/rsc/experiments/tests/test_methods_rag.py b/rsc/experiments/tests/test_methods_rag.py
+new file mode 100644
+index 0000000..e617ac4
+--- /dev/null
++++ b/rsc/experiments/tests/test_methods_rag.py
+@@ -0,0 +1,61 @@
++import pathlib
++import pytest
++
++from rsc.methods.retrieval import Retriever, Card, audit_prompt_leak, leaks, normalize_formula
++from rsc.methods.hypotheses import build_prompt, propose
++from rsc.methods.stack import build_stack
++from rsc.methods.env import ApiEnv
++from rsc.methods.llm import FixtureLLM
++from methods_helpers import make_task, stack_with
++
++KB = pathlib.Path(__file__).resolve().parents[3] / "config" / "formula_kb.example.yml"
++
++
++def test_retrieves_relevant_card_first():
++    r = Retriever.from_yaml(KB, k=2)
++    top = r.retrieve("enzyme reaction rate saturating with substrate concentration")
++    assert top[0].id == "kb_michaelis"
++    assert r.retrieve("zzzz qqqq") == []                     # nothing relevant -> no padding with random cards
++
++
++def test_retrieval_is_deterministic():
++    r = Retriever.from_yaml(KB)
++    assert [c.id for c in r.retrieve("interest on a balance")] == [c.id for c in r.retrieve("interest on a balance")]
++
++
++def test_leak_filter_removes_the_answer():
++    r = Retriever.from_yaml(KB)
++    assert any(c.id == "kb_ohm" for c in r.retrieve("current through a resistor"))
++    view = r.view_for_case(case_id="other", gt_formula="y = V/R")          # the ground truth equals a card
++    assert all(c.id != "kb_ohm" for c in view.cards)
++    assert not any(leaks("V/R", c) for c in view.cards)
++    assert any(c.id == "kb_ohm" for c in r.cards)                          # original retriever untouched
++    view2 = r.view_for_case(case_id="kb_ohm")                              # the card of the case itself
++    assert all(c.id != "kb_ohm" for c in view2.cards)
++
++
++def test_prompt_audit_catches_a_leak():
++    assert audit_prompt_leak("Reference: P*(1+r/n)**(n*t)", "P * (1 + r/n) ^ (n*t)")
++    assert not audit_prompt_leak("Reference: 0.5*m*v**2", "n*R*T/V")
++
++
++def test_rag_is_off_by_default_and_changes_the_prompt_only_when_on():
++    task = make_task()
++    s_off = stack_with(["x"])
++    propose(s_off, task)
++    assert "Reference formulas" not in s_off.llm.prompts[-1]
++    assert s_off.provenance()["rag"] is False
++    s_on = stack_with(["x"], retriever=Retriever.from_yaml(KB))
++    t2 = make_task()
++    object.__setattr__(t2, "description", "current through a resistor from voltage and resistance")
++    propose(s_on, t2)
++    assert "Reference formulas" in s_on.llm.prompts[-1] and "V/R" in s_on.llm.prompts[-1]
++    assert s_on.provenance()["rag"] is True
++
++
++def test_no_context_when_nothing_relevant():
++    t = make_task()
++    object.__setattr__(t, "description", "zzzz qqqq")
++    s = stack_with(["x"], retriever=Retriever.from_yaml(KB))
++    propose(s, t)
++    assert "Reference formulas" not in s.llm.prompts[-1]
+diff --git a/rsc/experiments/tests/test_methods_rows.py b/rsc/experiments/tests/test_methods_rows.py
+new file mode 100644
+index 0000000..5da0202
+--- /dev/null
++++ b/rsc/experiments/tests/test_methods_rows.py
+@@ -0,0 +1,76 @@
++import json, pathlib, re
++import numpy as np
++import pytest
++
++from methods_helpers import make_task, stack_with, ROOT
++from rsc.methods.common import FitResult
++from rsc.methods.rows import result_row, METHOD_NAME, config_hash
++from rsc.methods.variants import REGISTRY, make
++
++KW = dict(engine_version="v5.0", case_set_hash="abc123", split="random", threshold=0.99)
++
++
++def _row(vid="V2", eqs=("4*x",), **over):
++    task = make_task()
++    stack = stack_with(list(eqs))
++    fit = make(vid).run(task, stack)
++    Xf = np.linspace(6, 9, 20).reshape(-1, 1)
++    return result_row(vid, task, fit, stack, X_far=Xf, y_far=4 * Xf[:, 0], **{**KW, **over}), fit, stack
++
++
++def test_row_has_the_documented_fields():
++    row, _, _ = _row()
++    for k in ("seed", "engine_version", "api_calls", "wall_s", "decision", "r2_far", "llm_model", "temperature_requested",
++              "case_set_hash", "split", "threshold", "config_hash", "comparability_key", "method", "synthetic"):
++        assert k in row, k
++    assert row["seed"] == 42 and row["api_calls"] == 1 and row["engine_version"] == "v5.0"
++    json.dumps(row, default=str)                         # serialisable
++
++
++def test_r2_far_is_recomputed_from_predictions_not_the_reported_number():
++    task = make_task(); stack = stack_with([])
++    lying = FitResult("V2", "llm", lambda X: np.zeros(len(X)), train_r2=0.9999)      # claims 0.9999, predicts zeros
++    Xf = np.linspace(6, 9, 20).reshape(-1, 1)
++    row = result_row("V2", task, lying, stack, X_far=Xf, y_far=4 * Xf[:, 0], **KW)
++    assert row["train_r2_reported"] == 0.9999 and row["r2_far"] < 0
++
++
++def test_missing_comparability_inputs_cannot_be_defaulted():
++    task = make_task(); stack = stack_with(["4*x"]); fit = make("V2").run(task, stack)
++    with pytest.raises(TypeError):
++        result_row("V2", task, fit, stack, X_far=task.X, y_far=task.y)             # no engine_version / hash / split / threshold
++
++
++def test_fixture_substitute_sklearn_rows_are_marked_synthetic():
++    row, _, _ = _row()
++    assert row["synthetic"] is True
++    assert {"llm_backend=fixture", "search_engine=substitute_feature_library"} <= set(row["synthetic_reasons"])
++
++
++def test_config_hash_changes_with_variant_params():
++    task = make_task(); stack = stack_with(["4*x"])
++    a = make("V2").run(task, stack); b = make("V2", tie_eps=0.05).run(task, stack)
++    assert config_hash(stack, a) != config_hash(stack, b)
++    assert config_hash(stack, a) == config_hash(stack, make("V2").run(task, stack))
++
++
++def test_api_key_never_in_a_row(monkeypatch):
++    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-SECRET-123")
++    row, _, _ = _row()
++    assert "SECRET-123" not in json.dumps(row, default=str)
++
++
++def test_every_registry_id_has_a_method_name():
++    for vid in REGISTRY:
++        base = vid.split("_")[0] if vid.startswith("V4_") else vid
++        assert base in METHOD_NAME
++
++
++def test_method_names_match_frozen_aliases_when_that_file_exists():
++    p = ROOT / "config" / "variants.yml"
++    if not p.is_file():
++        pytest.skip("config/variants.yml (frozen table) is not in this tree yet")
++    import yaml
++    table = yaml.safe_load(p.read_text())["variants"]
++    for vid, name in METHOD_NAME.items():
++        assert any(re.search(a, name, re.I) for a in table[vid]["aliases"]), (vid, name)
+diff --git a/rsc/experiments/tests/test_methods_variants.py b/rsc/experiments/tests/test_methods_variants.py
+new file mode 100644
+index 0000000..ca081bd
+--- /dev/null
++++ b/rsc/experiments/tests/test_methods_variants.py
+@@ -0,0 +1,222 @@
++import numpy as np
++import pytest
++
++from rsc.methods.common import r2, safe_predict
++from rsc.methods.variants import REGISTRY, make
++from rsc.methods.variants import search_variants as sv
++from rsc.methods.variants import validation_selected as v6
++from rsc.methods.search import SearchResult, SubstituteSearch
++from methods_helpers import make_task, stack_with
++
++
++# ---------------------------------------------------------------- bad LLM answers never crash any LLM-based variant
++BAD = ["x +", "foo*2", "9**9**9", "__import__('os')", "", "0*x"]
++
++
++@pytest.mark.parametrize("vid", ["B_LLM", "V1", "V2", "V3", "V4", "V4_seed", "V4_fallback", "V6", "V7"])
++@pytest.mark.parametrize("bad", BAD)
++def test_bad_llm_answer_is_survivable(vid, bad):
++    task = make_task()
++    res = make(vid).run(task, stack_with([bad]))
++    assert res.decision and np.isfinite(res.train_r2) or res.train_r2 == float("-inf")
++    safe_predict(res, task.X)                       # must not raise
++
++
++@pytest.mark.parametrize("vid", ["B_LLM", "V1", "V2", "V3", "V4", "V6", "V7"])
++def test_no_llm_answer_at_all(vid):
++    res = make(vid).run(make_task(), stack_with([]))
++    assert res.decision
++
++
++@pytest.mark.parametrize("vid", list(REGISTRY))
++def test_every_variant_runs_and_reports_calls(vid):
++    task = make_task(fn=lambda X: 2 * X[:, 0] + X[:, 1] ** 2, names=("a", "b"), Xfar=np.full((5, 2), 8.0))
++    res = make(vid).run(task, stack_with(["2*a + b**2"]))
++    assert res.variant == (vid.split("_")[0] if vid.startswith("V4_") else vid)
++    assert res.api_calls >= 0 and "seconds" in res.info
++    assert np.isfinite(safe_predict(res, task.X)).any()
++
++
++# ---------------------------------------------------------------- V1
++def test_v1_near_perfect_formula_wins():
++    assert make("V1").run(make_task(fn=lambda X: 3 * X[:, 0] + 2), stack_with(["3*x + 2"])).decision == "fitted_llm"
++
++
++def test_v1_useless_formula_goes_to_nn_or_ensemble():
++    r = make("V1").run(make_task(), stack_with(["0*x"]))
++    assert r.decision in ("nn", "ensemble")
++
++
++def test_v1_affine_refit_rescues_wrong_scale():
++    r = make("V1").run(make_task(fn=lambda X: 3 * X[:, 0] + 2), stack_with(["x"]))   # right shape, wrong a,b
++    assert r.decision == "fitted_llm" and r.info["refit_a"] == pytest.approx(3, abs=1e-6)
++
++
++# ---------------------------------------------------------------- V2
++def test_v2_ties_favour_symbolic_and_force():
++    t = make_task()
++    assert make("V2").run(t, stack_with(["4*x"])).decision == "llm"
++    assert make("V2").run(t, stack_with(["0*x"])).decision == "nn"
++    r = make("V2", force_llm=True).run(t, stack_with(["0*x"]))
++    assert r.decision == "llm" and r.info["reason"] == "forced"
++
++
++def test_v2_no_formula_never_selects_llm():
++    # regression: -inf >= -inf - eps is True, so the original would pick a formula that does not exist
++    r = make("V2").run(make_task(), stack_with(["x +"]))
++    assert r.decision == "nn" and r.info["llm_failed"] is True
++
++
++def test_v2_reason_label_vs_true_failure_flag():
++    r = make("V2").run(make_task(fn=lambda X: X[:, 0] ** 2), stack_with(["x"]))   # valid but beaten formula
++    assert r.decision == "nn" and r.info["llm_failed"] is False
++
++
++# ---------------------------------------------------------------- V3
++def test_v3_weights_sum_to_one_and_favour_better():
++    r = make("V3").run(make_task(), stack_with(["4*x"]))
++    assert r.info["w_llm"] + r.info["w_nn"] == pytest.approx(1.0) and r.info["w_llm"] > 0.5
++
++
++def test_v3_forced_fallback_picks_argmax():
++    r = make("V3", force_fallback=True).run(make_task(), stack_with(["4*x"]))
++    assert r.decision == "fallback_max_llm"
++
++
++def test_v3_unusable_llm_degrades_to_nn_instead_of_blending_zeros():
++    assert make("V3").run(make_task(), stack_with(["x +"])).decision == "nn_llm_unavailable"
++
++
++# ---------------------------------------------------------------- V4
++def test_v4_modes():
++    t = make_task(fn=lambda X: X[:, 0] ** 2)
++    assert make("V4", mode="none").run(t, stack_with([])).api_calls == 0
++    assert make("V4", mode="hybrid").run(t, stack_with(["x**2"])).decision == "hybrid_llm_only"       # R2 > 0.95: search skipped
++    r = make("V4", mode="hybrid").run(t, stack_with(["0*x"]))
++    assert r.decision == "hybrid_search_better" and r.search_calls == 1
++    assert make("V4", mode="fallback").run(t, stack_with(["0*x"])).decision == "fallback_search_only"   # search already > 0.90, LLM not asked
++    assert make("V4", mode="fallback").run(t, stack_with(["0*x"])).api_calls == 0
++    with pytest.raises(ValueError):
++        make("V4", mode="bogus").run(t, stack_with([]))
++
++
++def test_v4_seed_without_guess_support_refuses_instead_of_running_unseeded():
++    stack = stack_with(["x**2"])
++    stack.search.supports_guesses = False
++    with pytest.raises(RuntimeError, match="guesses"):
++        make("V4", mode="seed").run(make_task(), stack)
++
++
++# ---------------------------------------------------------------- V5
++class _Fixed:
++    engine, supports_guesses = "fixed", True
++    def __init__(self, r2v, expr="x"):
++        self.r2v, self.expr, self.seeds, self.unary_seen = r2v, expr, [], []
++    def run(self, X, y, names, seed=42, guesses=None, unary=()):
++        self.seeds.append(seed); self.unary_seen.append(tuple(unary))
++        return SearchResult(self.expr, self.r2v, lambda Z: Z[:, 0], "fixed")
++
++
++def _v5(stack_engine, **kw):
++    stack = stack_with([]); stack.search = stack_engine
++    return make("V5", **kw).run(make_task(seed=100), stack), stack_engine
++
++
++def test_v5_early_stop_and_threshold_semantics():
++    r, e = _v5(_Fixed(0.96))
++    assert r.decision == "early_stop" and r.search_calls == 1 and r.info["success"] is False   # 0.96 stops early but < 0.97 success
++    r, e = _v5(_Fixed(0.96), transcendental=True, max_retries=3)
++    assert r.decision == "retries_exhausted" and r.search_calls == 3
++    r, e = _v5(_Fixed(0.98))
++    assert r.info["success"] is True
++
++
++def test_v5_overfit_check_blocks_early_stop():
++    r, e = _v5(_Fixed(0.96, expr="x" * 25), max_retries=4)      # len>20 and r2<0.999 -> 'overfit', keep retrying
++    assert r.search_calls == 4
++
++
++def test_v5_default_mirrors_documented_seeds_and_task_mode_is_opt_in():
++    _, e = _v5(_Fixed(0.3), max_retries=3)
++    assert e.seeds == [42, 43, 44]                                # documented behaviour: experiment seed does NOT reach V5
++    _, e = _v5(_Fixed(0.3), max_retries=3, seed_mode="task")
++    assert e.seeds == [100, 101, 102]                             # declared deviation: experiment seed + attempt
++
++
++def test_v5_physics_fallback_off_by_default_then_on():
++    r, _ = _v5(_Fixed(0.3), max_retries=1)
++    assert r.decision == "retries_exhausted"
++    stack = stack_with([]); stack.search = _Fixed(0.3)
++    r = make("V5", max_retries=1, enable_physics_fallback=True).run(make_task(), stack)
++    assert r.decision == "physics_fallback" and r.train_r2 > 0.99
++
++
++def test_v5_makes_no_llm_calls():
++    assert make("V5").run(make_task(), stack_with(["4*x"])).api_calls == 0
++
++
++def test_v5_rational_probe_injects_inv_only_after_bad_first_attempt():
++    rng = np.random.default_rng(0)
++    S = rng.uniform(0.1, 50, (150, 1)); y = 5 * S[:, 0] / (2 + S[:, 0])
++    assert sv.detect_rational_pattern(S, y)
++    assert not sv.detect_rational_pattern(S, 2 + np.sin(S[:, 0]))
++    e = _Fixed(0.05)
++    stack = stack_with([]); stack.search = e
++    from rsc.methods.common import Task
++    make("V5", max_retries=2).run(Task(S, y, ["S"], "mm"), stack)
++    assert "inv" not in e.unary_seen[0] and "inv" in e.unary_seen[1]
++
++
++# ---------------------------------------------------------------- V6
++def test_v6_validation_split_uses_high_end_of_training_range():
++    X = np.arange(50, dtype=float).reshape(-1, 1); y = X[:, 0]
++    Xi, yi, Xv, yv = v6.split_internal_validation(X, y)
++    assert Xv.min() > Xi.max() and len(Xv) == 10
++
++
++def test_v6_extrapolation_guard_drops_bare_nn():
++    fn = lambda X: 2 * X[:, 0] + X[:, 1] ** 2
++    near = make_task(fn=fn, names=("a", "b"), n=60, Xfar=np.full((4, 2), 3.0))       # inside the training range
++    far = make_task(fn=fn, names=("a", "b"), n=60, Xfar=np.full((4, 2), 9.0))        # outside it
++    r_in = make("V6").run(near, stack_with(["x +"]))                                  # no usable LLM formula
++    r_out = make("V6").run(far, stack_with(["x +"]))
++    assert not r_in.info["extrapolative"] and r_in.decision == "nn"
++    assert r_out.info["extrapolative"] and r_out.decision in ("linear_fallback", "linear_fallback_local")
++    # with a good formula the pool is LLM-anchored either way
++    r_llm = make("V6").run(far, stack_with(["2*a + b**2"]))
++    assert r_llm.decision in ("llm", "residual_nn", "blend")
++
++
++def test_v6_use_test_features_can_be_switched_off():
++    t = make_task(names=("a",), n=60, Xfar=np.full((4, 1), 9.0))
++    r = make("V6", use_test_features=False).run(t, stack_with(["4*a"]))
++    assert r.info["used_test_features"] is False and r.info["extrapolative"] is False
++
++
++def test_v6_tiny_training_set_does_not_crash():
++    t = make_task(n=8)
++    assert make("V6").run(t, stack_with(["4*x"])).decision == "llm"
++
++
++# ---------------------------------------------------------------- V7
++def test_v7_fails_fast_without_guess_support():
++    stack = stack_with(["x"]); stack.search.supports_guesses = False
++    with pytest.raises(RuntimeError, match="refusing"):
++        make("V7").run(make_task(), stack)
++
++
++def test_v7_records_seeded_and_unseeded_and_survives_llm_error():
++    t = make_task(fn=lambda X: X[:, 0] ** 3)
++    r = make("V7").run(t, stack_with(["x**3", "foo", "x +"]))
++    assert r.info["candidates_requested"] == 3 and r.info["candidates_seeded"] == 1 and r.search_calls == 2
++    stack = stack_with([]); stack.llm.complete = lambda p: (_ for _ in ()).throw(RuntimeError("api down"))
++    r2_ = make("V7").run(t, stack)
++    assert "api down" in r2_.info["llm_error"] and r2_.decision == "seeded_but_no_valid_guess"
++
++
++def test_substitute_guess_is_actually_used():
++    rng = np.random.default_rng(1)
++    X = rng.uniform(0.5, 3, (100, 1)); y = np.sin(X[:, 0]) ** 2 + 0.3 * np.exp(X[:, 0])
++    eng = SubstituteSearch(max_terms=1)
++    cold = eng.run(X, y, ["x"]); warm = eng.run(X, y, ["x"], guesses=["sin(x)**2 + 0.3*exp(x)"])
++    assert warm.r2 > 0.9999 > cold.r2
+diff --git a/rsc/methods/README.md b/rsc/methods/README.md
+new file mode 100644
+index 0000000..3461562
+--- /dev/null
++++ b/rsc/methods/README.md
+@@ -0,0 +1,79 @@
++# rsc/methods -- the methods layer (baselines + V1..V7) on one shared stack
++
++Status: PROPOSED by an agent branch (`agent/variants-refactor`). Nothing here is frozen and no number it prints is a result.
++
++## Layout (where each thing lives in this repo)
++
++```
++config/api_env.yml              the one API environment: model, temperature, key VARIABLE NAME, mode, budget
++config/formula_kb.example.yml   six-card EXAMPLE knowledge base for the optional RAG (not for anchor runs)
++.env.example                    how the key is supplied (normally just `export ANTHROPIC_API_KEY=...`)
++rsc/methods/env.py              ApiEnv: reads api_env.yml, resolves the key, decides live vs mock
++rsc/methods/llm.py              your llm.py + temperature policy, cache-key fix, token/budget tracking, FixtureLLM
++rsc/methods/nn.py               your nn.py + run_seed and tuple widths (defaults reproduce the old behaviour)
++rsc/methods/pysr.py             your pysr.py, UNCHANGED
++rsc/methods/common.py           sandbox, r2, Task, FitResult (one copy; replaces the block pasted in every script)
++rsc/methods/hypotheses.py       the shared "ask the LLM" step; RAG plugs in here
++rsc/methods/search.py           one interface over real PySR / a labelled substitute
++rsc/methods/retrieval.py        optional RAG: offline TF-IDF, leak filter, prompt audit (OFF by default)
++rsc/methods/stack.py            build_stack(): llm + nn + search + retriever; strict=True for paper runs
++rsc/methods/variants/           B_LLM B_NN B_PYSR V1 V2 V3 V4 V5 V6 V7: fit(task, stack) -> FitResult
++rsc/methods/rows.py             FitResult -> result row with the comparability fields and the synthetic marker
++rsc/methods/smoke.py            `make methods-smoke`: wiring check on one synthetic task (prints only, writes nothing)
++rsc/experiments/tests/test_methods_*.py   136 tests, run by the existing `make test`
++```
++Ids are the FROZEN ones of `config/variants.yml` (B_LLM, B_NN, B_PYSR, V1..V7; `V4_seed` / `V4_fallback` are V4 modes).
++
++```python
++from rsc.methods.stack import build_stack
++from rsc.methods.variants import make
++from rsc.methods.rows import result_row
++
++stack = build_stack(strict=True, pysr_populations=2, pysr_generations=500)   # refuses mock LLM / substitute search / sklearn NN
++fit = make("V4", mode="hybrid").run(task, stack)
++row = result_row("V4", task, fit, stack, X_far=Xf, y_far=yf, engine_version=..., case_set_hash=..., split="random", threshold=...)
++```
++
++## What is and is not verified
++
++Verified (tests, numpy / scikit-learn only): gate logic of V1..V7; every LLM-based variant surviving bad LLM answers;
++the formula sandbox; env / key / mode rules; the LLM client policies (against a fake SDK object); the cache-key fix;
++the NN seed fix; RAG retrieval and leak filtering; row fields, the synthetic marker, `r2_far` recomputation; the ten
++method names against the frozen alias regexes of `config/variants.yml`.
++
++NOT verified: real PySR/Julia (`PySRSearch` is written against your pysr.py, never executed), the live Anthropic API,
++the torch NN path, and `scripts/ingest_results.py` (not in the tree this was built against: confirm the row field names).
++V1-V4 are re-implementations of documented logic, NOT your real classes; nothing was diffed against LLM-HypatiaX-REPRO.
++The substitute search is not PySR: its output is wiring evidence only.
++
++## Findings to log in `audit/issues/issues.yml` (IDs to be assigned by you; "F" numbers are provisional)
++
++Disagreements between sources (stop condition of AGENT_PLAYBOOK: "a variant's documented behaviour contradicts its code"):
++* F1  V1 gate. DESIGN.md s2 says "scipy refit + R2>=0.85 & margin>0.05". The standalone script this port used says fitted R2 >= 0.97, else an
++      ensemble band, else NN. The code here follows the script (`fitted_threshold=0.97`); the DESIGN rule is NOT implemented because
++      "margin" is undefined in the sources. Needs the real `EnhancedHybridSystemDeFi`.
++* F2  V3 weighting. DESIGN.md says weight proportional to R2/sigma_resid; the script (and this code) uses 1/sigma_resid. AGENT_PLAYBOOK already
++      records a "V3 weighting mismatch": the real class decides.
++* F3  V5 seeds. Documented `42 + attempt`: the experiment seed never reaches V5, so a 5-seed V5 sweep is one run repeated. Default here mirrors the
++      documentation (`seed_mode="fixed42"`); `seed_mode="task"` is available but changes the comparability key: decide and log.
++* F4  NN seed. nn.py derives its seed from the description only, and says "as in the original ImprovedNN". If the real ImprovedNN does the same,
++      B_NN (and every NN inside V1, V2, V3, V6) has no seed variance. `run_seed` fixes it in this layer; the real baseline needs checking.
++* F5  Two LLM/PySR configurations in the tree: `model_config.yml` (claude-sonnet-5-5, T=0, 30 populations, 10000 generations) vs
++      `config/anchor.yml` draft (claude-sonnet-5, T=0.25, 2 populations, 500 iterations). api_env.yml currently carries the model_config values.
++      This is decision 0.3.
++* F6  V6 reads the test features (never labels) to detect extrapolation; no other variant does. `use_test_features=False` removes it.
++* F7  Cost per case: V7 = 1 LLM call + 2 searches, V5 = up to 5 searches, V6 trains about 7 NNs. Needed for decision 0.4.
++
++Defects found in the earlier standalone variant scripts (NOT confirmed in the real repo; each has a regression test here):
++SyntaxError from an LLM answer escaped the ValueError handlers (confirmed by running the script); `9**9**9` hangs the sandbox (confirmed);
++NameError on an unknown variable uncaught; V2 chose a non-existent formula when LLM and NN both scored -inf; V3 blended zeros for an unusable
++formula; V4 matched seed terms by substring ("x" in "exp(...)"); llm.py cache key ignored temperature; llm.py silently dropped a rejected
++`temperature`.
++
++## RAG (optional, OFF by default)
++Turning it on changes the experiment: treat it as a declared ablation (`build_stack(retriever=Retriever.from_yaml(kb))`; rows record `rag: true`
++in `provenance`). The main risk is leakage: `Retriever.view_for_case(case_id, gt_formula)` drops the case's own card and any card equal to or
++containing the ground truth, and `audit_prompt_leak(prompt, gt_formula)` checks a prompt before it is sent. `Task` has no ground-truth field.
++The example KB has six generic textbook cards; a real KB needs its own curation and leak audit (PLAYBOOK rule 6 wording applies: "reduced by
++construction and measured by a probe").
++Not built, each is also an experiment change: self-consistency sampling, critique-and-repair, a units check (pint is already in installation.yml).
+diff --git a/rsc/methods/__init__.py b/rsc/methods/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/rsc/methods/common.py b/rsc/methods/common.py
+new file mode 100644
+index 0000000..64e351b
+--- /dev/null
++++ b/rsc/methods/common.py
+@@ -0,0 +1,159 @@
++"""Shared building blocks (one copy, replacing the block that was pasted into every variant script)."""
++from __future__ import annotations
++import ast, math, warnings
++from dataclasses import dataclass, field
++from typing import Callable
++
++import numpy as np
++
++
++# ---------------------------------------------------------------- task / result
++@dataclass(frozen=True)
++class Task:
++    """Everything a method may see. There is deliberately NO ground-truth-formula field: a leak through
++    the Task is structurally impossible. X_test_features (features only, never y) exists because the
++    original V6 uses it to detect extrapolation; it is None unless the harness opts in."""
++    X: np.ndarray
++    y: np.ndarray
++    names: list
++    description: str
++    domain: str = "general"
++    seed: int = 42
++    case_id: str = ""
++    X_test_features: np.ndarray | None = None
++
++    def __post_init__(self):
++        if self.X.ndim != 2 or len(self.X) != len(self.y) or self.X.shape[1] != len(self.names):
++            raise ValueError(f"inconsistent task shapes X{self.X.shape} y{self.y.shape} names{len(self.names)}")
++
++
++@dataclass
++class FitResult:
++    variant: str
++    decision: str
++    predict: Callable[[np.ndarray], np.ndarray]
++    train_r2: float
++    equation: str | None = None
++    engine: str = ""
++    api_calls: int = 0
++    search_calls: int = 0
++    info: dict = field(default_factory=dict)
++
++
++def safe_predict(fit: FitResult, X: np.ndarray) -> np.ndarray:
++    """Raw predictions or NaNs: scoring recomputes R2 from these, never from a method-reported number."""
++    try:
++        p = np.asarray(fit.predict(X), dtype=float).ravel()
++        return p if p.shape == (len(X),) else np.full(len(X), np.nan)
++    except Exception:
++        return np.full(len(X), np.nan)
++
++
++# ---------------------------------------------------------------- metrics
++def r2(y_true, y_pred) -> float:
++    """R^2; -inf for non-finite or mis-shaped predictions (never raises, never NaN)."""
++    y_true = np.asarray(y_true, dtype=float)
++    y_pred = np.asarray(y_pred, dtype=float)
++    if y_pred.shape != y_true.shape or not np.all(np.isfinite(y_pred)):
++        return float("-inf")
++    ss_res = float(np.sum((y_true - y_pred) ** 2))
++    ss_tot = float(np.sum((y_true - y_true.mean()) ** 2))
++    if ss_tot <= 1e-300:
++        return 1.0 if ss_res <= 1e-9 else 0.0
++    return 1.0 - ss_res / ss_tot
++
++
++# ---------------------------------------------------------------- sandboxed evaluation
++class EquationError(ValueError):
++    """Equation is unparseable / uses something outside the allowed grammar."""
++
++
++_ALLOWED_NODES = (ast.Expression, ast.BinOp, ast.UnaryOp, ast.Call, ast.Name, ast.Constant, ast.Load,
++                  ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow, ast.USub, ast.UAdd, ast.Mod)
++_ALLOWED_FUNCS = {"sqrt", "log", "exp", "sin", "cos", "tan", "abs", "Abs", "sign",
++                  "arcsin", "arccos", "arctan", "asin", "acos", "atan"}
++_FUNCS = {"sqrt": np.sqrt, "log": np.log, "exp": np.exp, "sin": np.sin, "cos": np.cos, "tan": np.tan,
++          "abs": np.abs, "Abs": np.abs, "sign": np.sign, "arcsin": np.arcsin, "arccos": np.arccos,
++          "arctan": np.arctan, "asin": np.arcsin, "acos": np.arccos, "atan": np.arctan}
++_CONSTS = {"pi": math.pi, "e": math.e, "h": 6.62607015e-34, "hbar": 1.0545718176e-34, "c": 2.99792458e8,
++           "k_B": 1.380649e-23, "k": 1.380649e-23, "N_A": 6.02214076e23, "g_n": 9.80665,
++           "m_e": 9.1093837015e-31, "q_e": 1.602176634e-19, "epsilon0": 8.8541878128e-12, "mu0": 1.25663706212e-6}
++MAX_EXPR_CHARS = 2000
++
++
++class _FloatConsts(ast.NodeTransformer):
++    """All numeric literals become floats. Without this, `9**9**9` is an exact-integer power that never
++    finishes (a one-line DoS from any LLM answer); as floats it raises OverflowError immediately."""
++    def visit_Constant(self, node):
++        if isinstance(node.value, bool) or not isinstance(node.value, (int, float)):
++            raise EquationError("only numeric constants are allowed")
++        return ast.copy_location(ast.Constant(float(node.value)), node)
++
++
++def _parse(expr: str) -> ast.Expression:
++    if not isinstance(expr, str) or not expr.strip() or len(expr) > MAX_EXPR_CHARS:
++        raise EquationError("empty, non-string or over-long expression")
++    try:
++        tree = ast.parse(expr.strip(), mode="eval")
++    except SyntaxError as e:                      # originals let SyntaxError escape the ValueError handlers
++        raise EquationError(f"syntax error: {e.msg}") from e
++    for node in ast.walk(tree):
++        if not isinstance(node, _ALLOWED_NODES):
++            raise EquationError(f"disallowed element: {type(node).__name__}")
++        if isinstance(node, ast.Name) and node.id.startswith("__"):
++            raise EquationError("dunder access blocked")
++        if isinstance(node, ast.Call):
++            if not isinstance(node.func, ast.Name) or node.func.id not in _ALLOWED_FUNCS:
++                raise EquationError("function not allowed")
++    return ast.fix_missing_locations(_FloatConsts().visit(tree))
++
++
++def screen_code(expr: str) -> None:
++    _parse(expr)
++
++
++def equation_ok(expr: str, names: list) -> bool:
++    """Parses, passes the grammar screen, and uses only known variables / constants / functions."""
++    try:
++        tree = _parse(expr)
++    except EquationError:
++        return False
++    known = set(names) | set(_FUNCS) | set(_CONSTS)
++    return all(n.id in known for n in ast.walk(tree) if isinstance(n, ast.Name))
++
++
++def predict_from_equation(equation: str, X: np.ndarray, names: list) -> np.ndarray:
++    tree = _parse(equation)
++    ns = {n: X[:, i] for i, n in enumerate(names)}
++    ns.update(_FUNCS)
++    for k, v in _CONSTS.items():
++        ns.setdefault(k, v)
++    with warnings.catch_warnings():
++        warnings.simplefilter("ignore")
++        out = eval(compile(tree, "<equation>", "eval"), {"__builtins__": {}}, ns)
++    out = np.asarray(out, dtype=float)
++    return np.full(X.shape[0], float(out)) if out.ndim == 0 else out
++
++
++def try_predict(equation: str | None, X: np.ndarray, names: list) -> np.ndarray | None:
++    """None on ANY failure (syntax, unknown name, overflow, wrong shape). Variants branch on None."""
++    if not equation:
++        return None
++    try:
++        p = predict_from_equation(equation, X, names)
++        return p if p.shape == (len(X),) else None
++    except Exception:
++        return None
++
++
++def affine_refit(pred: np.ndarray, y: np.ndarray):
++    """Least squares a*pred+b (closed form; the original used scipy least_squares on the same linear problem)."""
++    A = np.column_stack([pred, np.ones_like(pred)])
++    (a, b), *_ = np.linalg.lstsq(A, y, rcond=None)
++    return a * pred + b, float(a), float(b)
++
++
++def inverse_std_weights(resid_a: np.ndarray, resid_b: np.ndarray):
++    sa, sb = float(np.std(resid_a)) + 1e-9, float(np.std(resid_b)) + 1e-9
++    wa = (1 / sa) / (1 / sa + 1 / sb)
++    return wa, 1 - wa
+diff --git a/rsc/methods/env.py b/rsc/methods/env.py
+new file mode 100644
+index 0000000..9478315
+--- /dev/null
++++ b/rsc/methods/env.py
+@@ -0,0 +1,131 @@
++"""API environment loader. One typed object built from config/api_env.yml + the process environment.
++
++Design rules (each one is covered by a test):
++  * the key is looked up, never stored in the config, never included in public_dict()/repr
++  * mode=live with no key is an error, not a silent downgrade to the mock
++  * a budget without prices is an error (we do not invent prices)
++"""
++from __future__ import annotations
++import os
++import pathlib
++from dataclasses import dataclass, field
++from typing import Mapping
++
++import yaml
++
++ROOT = pathlib.Path(os.environ.get("HX_ROOT") or pathlib.Path(__file__).resolve().parents[2])   # repo root: rsc/methods/env.py -> parents[2]
++DEFAULT_CONFIG = ROOT / "config" / "api_env.yml"
++
++
++class EnvError(RuntimeError):
++    pass
++
++
++def _read_dotenv(path: pathlib.Path) -> dict:
++    out: dict = {}
++    if not path.is_file():
++        return out
++    for line in path.read_text().splitlines():
++        line = line.strip()
++        if not line or line.startswith("#") or "=" not in line:
++            continue
++        k, v = line.split("=", 1)
++        v = v.strip().strip('"').strip("'")
++        if v:
++            out[k.strip()] = v
++    return out
++
++
++@dataclass
++class ApiEnv:
++    provider: str = "anthropic"
++    api_key_env: str = "ANTHROPIC_API_KEY"
++    base_url_env: str | None = "ANTHROPIC_BASE_URL"
++    dotenv: str | None = ".env"
++    mode: str = "auto"
++    model: str = "claude-sonnet-5-5"
++    temperature: float = 0.0
++    strict_temperature: bool = True
++    max_tokens: int = 1500
++    timeout_s: float = 60.0
++    max_retries: int = 3
++    budget_usd: float | None = None
++    price_in: float | None = None
++    price_out: float | None = None
++    freeze_cache_env: str = "HYPATIAX_LLM_FREEZE_CACHE"
++    _root: pathlib.Path = field(default=ROOT, repr=False)
++
++    # ---- construction -------------------------------------------------
++    @classmethod
++    def load(cls, path: str | os.PathLike | None = None) -> "ApiEnv":
++        path = pathlib.Path(path or os.environ.get("HX_API_ENV") or DEFAULT_CONFIG)
++        raw = yaml.safe_load(path.read_text()) if path.is_file() else {}
++        raw = raw or {}
++        price = raw.get("price_usd_per_mtok") or {}
++        env = cls(
++            provider=raw.get("provider", "anthropic"),
++            api_key_env=raw.get("api_key_env", "ANTHROPIC_API_KEY"),
++            base_url_env=raw.get("base_url_env"),
++            dotenv=raw.get("dotenv"),
++            mode=raw.get("mode", "auto"),
++            model=raw.get("model", "claude-sonnet-5-5"),
++            temperature=float(raw.get("temperature", 0.0)),
++            strict_temperature=bool(raw.get("strict_temperature", True)),
++            max_tokens=int(raw.get("max_tokens", 1500)),
++            timeout_s=float(raw.get("timeout_s", 60)),
++            max_retries=int(raw.get("max_retries", 3)),
++            budget_usd=raw.get("budget_usd"),
++            price_in=price.get("input"),
++            price_out=price.get("output"),
++            freeze_cache_env=raw.get("freeze_cache_env", "HYPATIAX_LLM_FREEZE_CACHE"),
++            _root=path.resolve().parents[1] if path.is_file() else ROOT,
++        )
++        env.validate()
++        return env
++
++    def validate(self) -> None:
++        if self.mode not in ("auto", "live", "mock"):
++            raise EnvError(f"mode must be auto|live|mock, got {self.mode!r}")
++        if self.provider != "anthropic":
++            raise EnvError(f"only provider=anthropic is implemented, got {self.provider!r}")
++        if self.budget_usd is not None and (self.price_in is None or self.price_out is None):
++            raise EnvError("budget_usd is set but price_usd_per_mtok.input/output are null: "
++                           "fill in the prices from your console (they are not guessed here)")
++
++    # ---- secrets ------------------------------------------------------
++    def _dotenv_values(self) -> dict:
++        if not self.dotenv:
++            return {}
++        p = pathlib.Path(self.dotenv)
++        return _read_dotenv(p if p.is_absolute() else self._root / p)
++
++    def api_key(self, environ: Mapping[str, str] | None = None) -> str | None:
++        environ = os.environ if environ is None else environ
++        return environ.get(self.api_key_env) or self._dotenv_values().get(self.api_key_env) or None
++
++    def base_url(self, environ: Mapping[str, str] | None = None) -> str | None:
++        if not self.base_url_env:
++            return None
++        environ = os.environ if environ is None else environ
++        return environ.get(self.base_url_env) or self._dotenv_values().get(self.base_url_env) or None
++
++    def freeze_cache_path(self, environ: Mapping[str, str] | None = None) -> str | None:
++        environ = os.environ if environ is None else environ
++        return environ.get(self.freeze_cache_env) or None
++
++    # ---- mode ---------------------------------------------------------
++    def resolved_mode(self, environ: Mapping[str, str] | None = None) -> str:
++        has_key = self.api_key(environ) is not None
++        if self.mode == "live":
++            if not has_key:
++                raise EnvError(f"mode=live but {self.api_key_env} is not set (environment or {self.dotenv})")
++            return "live"
++        if self.mode == "mock":
++            return "mock"
++        return "live" if has_key else "mock"
++
++    def public_dict(self) -> dict:
++        """Safe to write into result rows / logs: never contains the key."""
++        return {"provider": self.provider, "model": self.model, "temperature": self.temperature,
++                "strict_temperature": self.strict_temperature, "mode": self.mode,
++                "max_tokens": self.max_tokens, "budget_usd": self.budget_usd}
+diff --git a/rsc/methods/hypotheses.py b/rsc/methods/hypotheses.py
+new file mode 100644
+index 0000000..4a3563e
+--- /dev/null
++++ b/rsc/methods/hypotheses.py
+@@ -0,0 +1,72 @@
++"""The shared 'ask the LLM for candidate formulas' step used by every LLM-based variant."""
++from __future__ import annotations
++import json, re
++from dataclasses import dataclass
++
++import numpy as np
++
++from .common import Task, r2, try_predict, equation_ok
++
++
++@dataclass
++class Hyp:
++    equation: str
++    confidence: float = 0.5
++    reasoning: str = ""
++    r2: float = float("-inf")          # on TRAINING data
++    pred: np.ndarray | None = None     # training predictions (None if the equation failed to evaluate)
++
++
++def clean_equation(eq: str) -> str:
++    eq = str(eq or "")
++    if "=" in eq:
++        eq = eq.split("=", 1)[1]
++    eq = eq.strip().replace("^", "**")
++    return re.sub(r"\b(np|numpy|math)\.", "", eq)
++
++
++def build_prompt(task: Task, n: int = 1, context: str = "") -> str:
++    ctx = f"{context}\n" if context else ""
++    case = f"# case: {task.case_id}\n" if task.case_id else ""      # lets scripted test LLMs key on the case
++    return (f"{case}You are an expert scientific equation discovery system.\n"
++            f"Domain: {task.domain}\nDescription: {task.description}\n"
++            f"Variables: {', '.join(task.names)}\n{ctx}"
++            f"Generate {n} candidate equations using Python syntax (** / * / + / -) and only the functions "
++            f"sqrt, log, exp, sin, cos, tan, abs.\n"
++            'Return ONLY a JSON array: [{"equation": "y = ...", "confidence": 0.9, "reasoning": "..."}]')
++
++
++def parse_hypotheses(text: str) -> list:
++    try:
++        if "```" in text:
++            body = text.split("```", 2)[1]
++            body = body[4:] if body.lstrip().startswith("json") else body
++        else:
++            body = text[text.find("["): text.rfind("]") + 1]
++        data = json.loads(body)
++        return [Hyp(clean_equation(c.get("equation", "")), float(c.get("confidence", 0.5)), str(c.get("reasoning", "")))
++                for c in data if isinstance(c, dict)]
++    except Exception:
++        return []
++
++
++def propose(stack, task: Task, n: int = 1) -> list:
++    """Ask the LLM, parse, and score every candidate on the training data. Unusable equations are kept
++    with pred=None / r2=-inf so callers can see (and count) failures instead of crashing on them."""
++    context = ""
++    if getattr(stack, "retriever", None) is not None:
++        context = stack.retriever.context(f"{task.description} {task.domain} {' '.join(task.names)}")
++    hyps = parse_hypotheses(stack.llm.complete(build_prompt(task, n, context)))
++    for h in hyps:
++        if equation_ok(h.equation, task.names):
++            h.pred = try_predict(h.equation, task.X, task.names)
++        if h.pred is not None:
++            h.r2 = r2(task.y, h.pred)
++        else:
++            h.pred, h.r2 = None, float("-inf")
++    return hyps
++
++
++def best_usable(hyps: list) -> Hyp | None:
++    ok = [h for h in hyps if h.pred is not None and np.isfinite(h.r2)]
++    return max(ok, key=lambda h: h.r2) if ok else None
+diff --git a/rsc/methods/llm.py b/rsc/methods/llm.py
+new file mode 100644
+index 0000000..b73301b
+--- /dev/null
++++ b/rsc/methods/llm.py
+@@ -0,0 +1,167 @@
++"""Single LLM client (replaces the 3 duplicated _create_message_deterministic copies, report s7.1).
++
++Changes vs the version you uploaded (everything else is kept):
++  * settings come from config/api_env.yml through ApiEnv (one source of truth)
++  * `temperature` rejection is a policy: strict_temperature=true raises; false retries without it and
++    RECORDS temperature_used=None, so a result row can never claim a temperature that was not applied
++  * the freeze-cache key now includes temperature and max_tokens (before, changing temperature
++    silently returned stale cached text)
++  * token usage and optional USD budget are tracked; BudgetExceeded stops the run
++  * a client can be injected (tests) and `meta()` returns what must be stored next to every result
++  * FixtureLLM: scripted answers for tests / smoke runs; MockLLM now returns the JSON format the parser expects
++"""
++from __future__ import annotations
++import hashlib, json, os, pathlib, re
++from typing import Callable
++
++from .env import ApiEnv
++
++
++class BudgetExceeded(RuntimeError):
++    pass
++
++
++class TemperatureRejected(RuntimeError):
++    pass
++
++
++class _Base:
++    name = "base"
++    backend = "base"
++    api_calls = 0
++
++    def meta(self) -> dict:
++        return {"backend": self.backend, "api_calls": self.api_calls}
++
++
++class MockLLM(_Base):
++    """Deterministic offline stand-in. NOT a language model: results from it are not scientific results."""
++    name = "mock"
++    backend = "mock"
++
++    def __init__(self):
++        self.api_calls = 0
++
++    def complete(self, prompt: str, **_) -> str:
++        self.api_calls += 1
++        m = re.search(r"^Variables:\s*(.+)$", prompt, flags=re.M)
++        names = [v.strip() for v in m.group(1).split(",")] if m else ["x0"]
++        h = int(hashlib.sha256(prompt.encode()).hexdigest(), 16)
++        coef = 1 + h % 5
++        expr = f"{coef}.0*{names[0]}*{names[1]}" if len(names) > 1 else f"{coef}.0*{names[0]}"
++        return json.dumps([{"equation": f"y = {expr}", "confidence": 0.1, "reasoning": "mock"}])
++
++    def meta(self) -> dict:
++        return {"backend": "mock", "api_calls": self.api_calls, "model": "mock",
++                "temperature_requested": None, "temperature_used": None}
++
++
++class FixtureLLM(_Base):
++    """Scripted answers: fixtures[case_id or 'default'] -> list of {equation, confidence, reasoning}.
++    Used by tests and the smoke run so gate logic is exercised without an API key."""
++    name = "fixture"
++    backend = "fixture"
++
++    def __init__(self, fixtures: dict, case_getter: Callable[[str], str | None] | None = None):
++        self.fixtures = fixtures
++        self.api_calls = 0
++        self.prompts: list[str] = []
++        self._case = case_getter or (lambda p: (re.search(r"^# case: (.+)$", p, flags=re.M) or [None, None])[1])
++
++    def complete(self, prompt: str, **_) -> str:
++        self.api_calls += 1
++        self.prompts.append(prompt)
++        cid = self._case(prompt)
++        return json.dumps(self.fixtures.get(cid, self.fixtures.get("default", [])))
++
++    def meta(self) -> dict:
++        return {"backend": "fixture", "api_calls": self.api_calls, "model": "fixture",
++                "temperature_requested": None, "temperature_used": None}
++
++
++class LLMClient(_Base):
++    name = "anthropic"
++    backend = "live"
++
++    def __init__(self, env: ApiEnv | None = None, client=None, model: str | None = None,
++                 temperature: float | None = None):
++        self.env = env or ApiEnv.load()
++        self.model = model or self.env.model
++        self.temperature = self.env.temperature if temperature is None else temperature
++        self.temperature_used: float | None = self.temperature
++        self.temperature_dropped = False
++        self.api_calls = 0
++        self.cache_hits = 0
++        self.tokens_in = 0
++        self.tokens_out = 0
++        self.client = client if client is not None else self._make_client()
++        self._cache_path = self.env.freeze_cache_path()
++        p = pathlib.Path(self._cache_path) if self._cache_path else None
++        self._cache = json.loads(p.read_text()) if p and p.exists() else {}
++
++    # ---- construction -------------------------------------------------
++    def _make_client(self):
++        import anthropic  # lazy: only needed for live runs
++        key = self.env.api_key()
++        if not key:
++            raise RuntimeError(f"{self.env.api_key_env} is not set")
++        kw = dict(api_key=key, timeout=self.env.timeout_s, max_retries=self.env.max_retries)
++        if self.env.base_url():
++            kw["base_url"] = self.env.base_url()
++        return anthropic.Anthropic(**kw)
++
++    # ---- accounting ---------------------------------------------------
++    def cost_usd(self) -> float | None:
++        if self.env.price_in is None or self.env.price_out is None:
++            return None
++        return (self.tokens_in * self.env.price_in + self.tokens_out * self.env.price_out) / 1e6
++
++    def _check_budget(self) -> None:
++        if self.env.budget_usd is None:
++            return
++        c = self.cost_usd()
++        if c is not None and c >= self.env.budget_usd:
++            raise BudgetExceeded(f"spent ${c:.4f} >= budget ${self.env.budget_usd:.2f}")
++
++    def meta(self) -> dict:
++        return {"backend": "live", "model": self.model, "temperature_requested": self.temperature,
++                "temperature_used": self.temperature_used, "temperature_dropped": self.temperature_dropped,
++                "api_calls": self.api_calls, "cache_hits": self.cache_hits,
++                "tokens_in": self.tokens_in, "tokens_out": self.tokens_out, "cost_usd": self.cost_usd()}
++
++    # ---- the call -----------------------------------------------------
++    def complete(self, prompt: str, max_tokens: int | None = None) -> str:
++        max_tokens = max_tokens or self.env.max_tokens
++        key = hashlib.sha256(f"{self.model}|{self.temperature}|{max_tokens}|{prompt}".encode()).hexdigest()
++        if key in self._cache:
++            self.cache_hits += 1
++            return self._cache[key]
++        self._check_budget()
++        kw = dict(model=self.model, max_tokens=max_tokens, messages=[{"role": "user", "content": prompt}])
++        try:
++            r = self.client.messages.create(temperature=self.temperature, **kw)
++        except Exception as e:
++            if "temperature" not in str(e).lower():
++                raise
++            if self.env.strict_temperature:
++                raise TemperatureRejected(
++                    f"{self.model} rejected temperature={self.temperature} and strict_temperature=true: {e}") from e
++            self.temperature_dropped, self.temperature_used = True, None
++            r = self.client.messages.create(**kw)
++        self.api_calls += 1
++        u = getattr(r, "usage", None)
++        self.tokens_in += int(getattr(u, "input_tokens", 0) or 0)
++        self.tokens_out += int(getattr(u, "output_tokens", 0) or 0)
++        text = "".join(b.text for b in r.content if getattr(b, "type", "") == "text")
++        if self._cache_path:
++            self._cache[key] = text
++            tmp = pathlib.Path(self._cache_path + ".tmp")
++            tmp.write_text(json.dumps(self._cache))
++            os.replace(tmp, self._cache_path)
++        return text
++
++
++def get_client(env: ApiEnv | None = None):
++    """Live client if the environment says so, otherwise the mock. Check `.backend` before trusting results."""
++    env = env or ApiEnv.load()
++    return LLMClient(env) if env.resolved_mode() == "live" else MockLLM()
+diff --git a/rsc/methods/nn.py b/rsc/methods/nn.py
+new file mode 100644
+index 0000000..e24c447
+--- /dev/null
++++ b/rsc/methods/nn.py
+@@ -0,0 +1,62 @@
++"""NN baseline wrapper. Seed = sha256(description) (+ run_seed) mod 2**31.
++Uses torch MLP (LayerNorm+SiLU, AdamW, cosine warm restarts) when torch is installed, otherwise a scikit-learn MLP
++so smoke tests run anywhere. The paper's numbers must come from the torch path: `backend` is recorded.
++
++Changes vs the version you uploaded (defaults reproduce the old behaviour exactly):
++  * run_seed (default 0): the original seed depended on the description ONLY, so the 5 experiment seeds
++    all trained the identical network. Pass the experiment seed here to make seeds mean something.
++  * hidden may be an int (two layers of that width, as before) or a tuple of widths (V6 needs 2 architectures)
++"""
++from __future__ import annotations
++import hashlib, numpy as np
++
++
++def seed_from(description: str) -> int:
++    return int(hashlib.sha256(description.encode()).hexdigest(), 16) % (2 ** 31)
++
++
++class NNBaseline:
++    def __init__(self, description: str, epochs: int = 400, hidden: int | tuple = 64, run_seed: int = 0):
++        self.seed = (seed_from(description) + int(run_seed)) % (2 ** 31)
++        self.epochs = epochs
++        self.widths = (hidden, hidden) if isinstance(hidden, int) else tuple(hidden)
++        self.hidden = hidden
++        try:
++            import torch  # noqa: F401
++            self.backend = "torch"
++        except ImportError:
++            self.backend = "sklearn"
++
++    def fit(self, X, y):
++        X = np.asarray(X, float); y = np.asarray(y, float).ravel()
++        self.mu, self.sd = X.mean(0), X.std(0) + 1e-9; self.ym, self.ys = y.mean(), y.std() + 1e-9
++        Xn, yn = (X - self.mu) / self.sd, (y - self.ym) / self.ys
++        if self.backend == "torch":
++            import torch, torch.nn as nn
++            torch.manual_seed(self.seed)
++            layers, d = [], X.shape[1]
++            for w in self.widths:
++                layers += [nn.Linear(d, w), nn.LayerNorm(w), nn.SiLU()]
++                d = w
++            self.m = nn.Sequential(*layers, nn.Linear(d, 1))
++            opt = torch.optim.AdamW(self.m.parameters(), 3e-3); sch = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(opt, 100)
++            xt, yt = torch.tensor(Xn, dtype=torch.float32), torch.tensor(yn, dtype=torch.float32)[:, None]
++            for _ in range(self.epochs):
++                opt.zero_grad(); nn.functional.mse_loss(self.m(xt), yt).backward(); opt.step(); sch.step()
++        else:
++            import warnings
++            from sklearn.neural_network import MLPRegressor
++            with warnings.catch_warnings():
++                warnings.simplefilter("ignore")
++                self.m = MLPRegressor(hidden_layer_sizes=self.widths, max_iter=self.epochs * 3,
++                                      random_state=self.seed % (2 ** 31)).fit(Xn, yn)
++        return self
++
++    def predict(self, X):
++        Xn = (np.asarray(X, float) - self.mu) / self.sd
++        if self.backend == "torch":
++            import torch
++            with torch.no_grad(): p = self.m(torch.tensor(Xn, dtype=torch.float32)).numpy().ravel()
++        else:
++            p = self.m.predict(Xn)
++        return p * self.ys + self.ym
+diff --git a/rsc/methods/pysr.py b/rsc/methods/pysr.py
+new file mode 100644
+index 0000000..8c53025
+--- /dev/null
++++ b/rsc/methods/pysr.py
+@@ -0,0 +1,27 @@
++"""PySR wrapper: guarded import, capability probe for `guesses` (V7 needs it; report s4.6 says V4 'seed' mode only
++works if the installed build exposes it -- silently ignoring it would repeat the use_llm dead-path bug)."""
++from __future__ import annotations
++import inspect, os
++
++def available() -> bool:
++    try:
++        import pysr  # noqa: F401
++        return True
++    except Exception:
++        return False
++
++def supports_guesses() -> bool:
++    if not available(): return False
++    from pysr import PySRRegressor
++    return "guesses" in inspect.signature(PySRRegressor.__init__).parameters
++
++def make_regressor(seed: int = 42, generations: int | None = None, guesses=None, **kw):
++    """Raise (never ignore) when guesses are requested but unsupported."""
++    if not available(): raise RuntimeError("PySR/Julia not installed: real experiments need them (config/installation.yml)")
++    from pysr import PySRRegressor
++    if guesses and not supports_guesses():
++        raise RuntimeError("installed PySR has no `guesses` argument: refusing to run 'seeded' as unseeded (audit A-020)")
++    args = dict(populations=int(os.environ.get("PYSR_POPULATIONS", 30)), niterations=int(generations or os.environ.get("PYSR_GENERATIONS", 10000)),
++                random_state=seed, deterministic=True, parallelism="serial", **kw)
++    if guesses: args["guesses"] = guesses
++    return PySRRegressor(**args)
+diff --git a/rsc/methods/retrieval.py b/rsc/methods/retrieval.py
+new file mode 100644
+index 0000000..f50d181
+--- /dev/null
++++ b/rsc/methods/retrieval.py
+@@ -0,0 +1,90 @@
++"""Optional RAG for the LLM step: retrieve reference formula cards and put them in the prompt.
++
++Offline and dependency-free (TF-IDF + cosine) so a run is reproducible and costs no API calls.
++OFF by default everywhere: turning it on changes the experiment, so it must be a declared ablation.
++
++Leakage is the main risk of RAG in a benchmark (the knowledge base can contain the answer), so:
++  * view_for_case(case_id, gt_formula) returns a retriever with that case's card and any card whose
++    formula equals / contains the ground truth removed
++  * audit_prompt_leak(prompt, gt_formula) is a final check the harness can run on every prompt sent
++The Task object has no ground-truth field; the harness passes gt_formula to these two functions only.
++"""
++from __future__ import annotations
++import math, pathlib, re
++from dataclasses import dataclass
++from collections import Counter
++
++import yaml
++
++
++@dataclass(frozen=True)
++class Card:
++    id: str
++    name: str
++    domain: str
++    formula: str
++    variables: tuple
++    description: str
++    source: str = ""
++
++
++def normalize_formula(s: str) -> str:
++    s = re.sub(r"^\s*[A-Za-z_]\w*\s*=\s*", "", s or "")
++    return re.sub(r"\s+", "", s.replace("^", "**")).lower()
++
++
++def _tokens(text: str) -> list:
++    return re.findall(r"[a-z0-9_]+", (text or "").lower())
++
++
++def leaks(gt_formula: str, card: Card) -> bool:
++    g, c = normalize_formula(gt_formula), normalize_formula(card.formula)
++    return bool(g) and (g == c or (len(g) > 6 and g in c))
++
++
++def audit_prompt_leak(prompt: str, gt_formula: str) -> bool:
++    """True if the ground-truth formula text appears in the prompt (after normalisation)."""
++    g = normalize_formula(gt_formula)
++    return bool(g) and len(g) > 3 and g in re.sub(r"\s+", "", prompt.replace("^", "**")).lower()
++
++
++class Retriever:
++    def __init__(self, cards: list, k: int = 3):
++        self.cards, self.k = list(cards), k
++        docs = [Counter(_tokens(f"{c.name} {c.domain} {c.description} {' '.join(c.variables)}")) for c in self.cards]
++        n = len(docs)
++        df = Counter(t for d in docs for t in d)
++        self._idf = {t: math.log((n + 1) / (v + 1)) + 1.0 for t, v in df.items()}
++        self._vecs = [self._vec(d) for d in docs]
++
++    @classmethod
++    def from_yaml(cls, path, k: int = 3) -> "Retriever":
++        raw = yaml.safe_load(pathlib.Path(path).read_text()) or {}
++        cards = [Card(id=str(c["id"]), name=c["name"], domain=c.get("domain", ""), formula=c["formula"],
++                      variables=tuple(c.get("variables", [])), description=c.get("description", ""),
++                      source=c.get("source", "")) for c in raw.get("cards", [])]
++        return cls(cards, k=k)
++
++    def _vec(self, counts: Counter) -> dict:
++        v = {t: (1 + math.log(c)) * self._idf.get(t, 1.0) for t, c in counts.items()}
++        norm = math.sqrt(sum(x * x for x in v.values())) or 1.0
++        return {t: x / norm for t, x in v.items()}
++
++    def view_for_case(self, case_id: str | None = None, gt_formula: str | None = None) -> "Retriever":
++        keep = [c for c in self.cards
++                if not (case_id and c.id == case_id) and not (gt_formula and leaks(gt_formula, c))]
++        return Retriever(keep, k=self.k)
++
++    def retrieve(self, query: str, k: int | None = None) -> list:
++        q = self._vec(Counter(_tokens(query)))
++        scored = sorted(((sum(w * v.get(t, 0.0) for t, w in q.items()), c.id, c)
++                         for v, c in zip(self._vecs, self.cards)), key=lambda t: (-t[0], t[1]))
++        return [c for s, _, c in scored[: (k or self.k)] if s > 0]
++
++    def context(self, query: str, k: int | None = None) -> str:
++        cards = self.retrieve(query, k)
++        if not cards:
++            return ""
++        lines = [f"- {c.name} ({c.domain}): {c.formula}   [vars: {', '.join(c.variables)}]" for c in cards]
++        return ("Reference formulas from a knowledge base (may be irrelevant; use only if they truly apply):\n"
++                + "\n".join(lines))
+diff --git a/rsc/methods/rows.py b/rsc/methods/rows.py
+new file mode 100644
+index 0000000..62c979b
+--- /dev/null
++++ b/rsc/methods/rows.py
+@@ -0,0 +1,60 @@
++"""FitResult -> one result row carrying what PLAYBOOK_ANCHOR rule 4 (comparability key) and the ingest guards need.
++
++Field names follow the repo docs (seed, engine_version, api_calls, wall_s, decision, r2_far, llm model + temperature,
++case-set hash, split, threshold, config hash). scripts/ingest_results.py is NOT in the zip this was built against:
++confirm the exact names against it before the first smoke run (PLAYBOOK 6.1).
++
++Rules enforced here, not left to the caller:
++  * r2_far is RECOMPUTED from the raw far-range predictions; the method's own train_r2 is stored separately.
++  * engine_version, case_set_hash, split and threshold have no defaults: a row cannot be made without them.
++  * a row produced with the mock/fixture LLM, the substitute search or the sklearn NN is marked synthetic=True
++    (with the reasons), so the ingest guard "synthetic rows refused" can see it. Nothing here ever claims a row is REAL;
++    only ingest does.
++"""
++from __future__ import annotations
++import hashlib, json
++
++from .common import FitResult, Task, r2, safe_predict
++
++# First alias of each id in the FROZEN config/variants.yml (the regexes ingest matches against `method`).
++METHOD_NAME = {"B_LLM": "PureLLM", "B_NN": "ImprovedNN", "B_PYSR": "pysr_none",
++               "V1": "EnhancedHybridDeFi", "V2": "HybridAllDomains", "V3": "EnsembleLLMNN",
++               "V4": "SymbolicEngine", "V5": "HybridSystemV50", "V6": "V4Selector", "V7": "LLMPriorSeeding"}
++
++
++def config_hash(stack, fit: FitResult) -> str:
++    blob = {"api_env": stack.env.public_dict(), "variant_params": fit.info.get("variant_params", {}),
++            "search_engine": stack.search.engine, "rag": stack.retriever is not None}
++    return hashlib.sha256(json.dumps(blob, sort_keys=True, default=str).encode()).hexdigest()[:16]
++
++
++def result_row(variant_id: str, task: Task, fit: FitResult, stack, *, X_far, y_far, engine_version: str,
++               case_set_hash: str, split: str, threshold: float, X_test=None, y_test=None) -> dict:
++    prov = stack.provenance()
++    llm = prov["llm"]
++    reasons = []
++    if llm.get("backend") != "live":
++        reasons.append(f"llm_backend={llm.get('backend')}")
++    if prov["search_engine"] != "pysr":
++        reasons.append(f"search_engine={prov['search_engine']}")
++    if prov["nn_backend"] != "torch":
++        reasons.append(f"nn_backend={prov['nn_backend']}")
++    cfg = config_hash(stack, fit)
++    row = {
++        "method_id": variant_id, "method": METHOD_NAME[variant_id.split("_")[0] if variant_id.startswith("V4_") else variant_id],
++        "case_id": task.case_id, "seed": task.seed, "split": split, "threshold": threshold,
++        "engine_version": engine_version, "case_set_hash": case_set_hash, "config_hash": cfg,
++        "llm_model": llm.get("model"), "temperature_requested": llm.get("temperature_requested"),
++        "temperature_used": llm.get("temperature_used"),
++        "decision": fit.decision, "equation": fit.equation,
++        "r2_far": r2(y_far, safe_predict(fit, X_far)),
++        "r2_test": r2(y_test, safe_predict(fit, X_test)) if X_test is not None else None,
++        "train_r2_reported": fit.train_r2, "selects_on": fit.info.get("selects_on"),
++        "api_calls": fit.api_calls, "search_calls": fit.search_calls, "wall_s": fit.info.get("seconds"),
++        "synthetic": bool(reasons), "synthetic_reasons": reasons,
++        "provenance": prov,
++    }
++    row["comparability_key"] = [case_set_hash, split, task.seed, threshold, engine_version,
++                                f"{row['llm_model']}@{row['temperature_requested']}", cfg]
++    row["info"] = {k: v for k, v in fit.info.items() if k != "variant_params"}
++    return row
+diff --git a/rsc/methods/search.py b/rsc/methods/search.py
+new file mode 100644
+index 0000000..1799ef5
+--- /dev/null
++++ b/rsc/methods/search.py
+@@ -0,0 +1,117 @@
++"""Search engines behind one interface:  engine.run(X, y, names, seed, guesses, unary) -> SearchResult.
++
++PySRSearch      the real engine (needs `pip install pysr` + Julia). NOT executed in the authoring sandbox.
++SubstituteSearch greedy forward selection over a symbolic term library (numpy only). It is NOT PySR:
++                 numbers from it must never be compared with the paper. It exists so gate logic can be tested.
++
++`guesses` (equation strings) seed the search. The substitute adds each guess as one extra library column;
++PySR receives them through its `guesses` argument and refuses to run (pysr.make_regressor) if the installed
++build does not support it, rather than silently running unseeded.
++"""
++from __future__ import annotations
++import warnings
++from dataclasses import dataclass, field
++from typing import Callable
++
++import numpy as np
++
++from .common import predict_from_equation, equation_ok, r2
++
++DEFAULT_UNARY = ("sq", "sqrt", "log", "inv", "sin", "cos")
++
++
++@dataclass
++class SearchResult:
++    expression: str
++    r2: float
++    predict: Callable
++    engine: str
++    info: dict = field(default_factory=dict)
++
++
++def library_terms(names: list, unary) -> list:
++    t = list(names)
++    for n in names:
++        if "sq" in unary:   t.append(f"({n})**2")
++        if "sqrt" in unary: t.append(f"sqrt({n})")
++        if "log" in unary:  t.append(f"log({n})")
++        if "inv" in unary:  t.append(f"1/({n})")
++        if "sin" in unary:  t.append(f"sin({n})")
++        if "cos" in unary:  t.append(f"cos({n})")
++        if "exp" in unary:  t.append(f"exp({n})")
++    for i, a in enumerate(names):
++        for b in names[i + 1:]:
++            t.append(f"({a})*({b})")
++    return t
++
++
++class SubstituteSearch:
++    engine = "substitute_feature_library"
++    supports_guesses = True
++
++    def __init__(self, max_terms: int = 4):
++        self.max_terms = max_terms
++
++    def run(self, X, y, names, seed: int = 42, guesses=None, unary=DEFAULT_UNARY) -> SearchResult:
++        pool = library_terms(names, unary) + [g for g in (guesses or []) if equation_ok(g, names)]
++        cols, terms = [], []
++        for term in dict.fromkeys(pool):                      # de-duplicate, keep order
++            try:
++                v = predict_from_equation(term, X, names)
++            except Exception:
++                continue
++            if v.shape == (len(y),) and np.all(np.isfinite(v)) and np.std(v) > 1e-9:
++                cols.append(v); terms.append(term)
++        order = list(np.random.default_rng(seed).permutation(len(terms)))   # seed only breaks ties
++        M = np.column_stack(cols) if cols else np.zeros((len(y), 0))
++        selected: list = []
++        best_r2, coefs = -np.inf, np.array([float(np.mean(y))])
++        for _ in range(self.max_terms):
++            best_j, best_local, best_fit = None, best_r2, None
++            for j in order:
++                if j in selected:
++                    continue
++                A = np.column_stack([np.ones(len(y))] + [M[:, k] for k in selected + [j]])
++                with warnings.catch_warnings():
++                    warnings.simplefilter("ignore")
++                    c, *_ = np.linalg.lstsq(A, y, rcond=None)
++                s = r2(y, A @ c)
++                if s > best_local:
++                    best_local, best_j, best_fit = s, j, c
++            if best_j is None or best_local <= best_r2 + 1e-6:
++                break
++            selected.append(best_j); best_r2, coefs = best_local, best_fit
++        parts = [f"{float(c):.10g}*({terms[j]})" for c, j in zip(coefs[1:], selected)]
++        expr = " + ".join(parts + [f"{float(coefs[0]):.10g}"])
++        pred = predict_from_equation(expr, X, names)
++        return SearchResult(expr, r2(y, pred), lambda Xn, e=expr: predict_from_equation(e, Xn, names),
++                            self.engine, {"terms": [terms[j] for j in selected], "n_guesses": len(guesses or [])})
++
++
++class PySRSearch:
++    """Real PySR. Untested here (no Julia in the sandbox): run `python -m rsc.methods.smoke --search pysr` first."""
++    engine = "pysr"
++
++    def __init__(self, niterations: int | None = None, timeout_s: int | None = None):
++        self.niterations, self.timeout_s = niterations, timeout_s
++
++    @property
++    def supports_guesses(self) -> bool:
++        from . import pysr as P
++        return P.supports_guesses()
++
++    def run(self, X, y, names, seed: int = 42, guesses=None, unary=DEFAULT_UNARY) -> SearchResult:
++        from . import pysr as P
++        kw: dict = dict(binary_operators=["+", "-", "*", "/"])
++        ops = [u for u in unary if u in ("sin", "cos", "exp", "log", "sqrt")]
++        if "inv" in unary:
++            ops.append("inv(x) = 1/x"); kw["extra_sympy_mappings"] = {"inv": lambda x: 1 / x}
++        if ops:
++            kw["unary_operators"] = ops
++        if self.timeout_s:
++            kw["timeout_in_seconds"] = self.timeout_s
++        model = P.make_regressor(seed=seed, generations=self.niterations, guesses=guesses or None, **kw)
++        model.fit(X, y, variable_names=list(names))
++        pred = np.asarray(model.predict(X), float)
++        return SearchResult(str(model.sympy()), r2(y, pred), lambda Xn: np.asarray(model.predict(Xn), float),
++                            self.engine, {"n_guesses": len(guesses or [])})
+diff --git a/rsc/methods/smoke.py b/rsc/methods/smoke.py
+new file mode 100644
+index 0000000..155d725
+--- /dev/null
++++ b/rsc/methods/smoke.py
+@@ -0,0 +1,46 @@
++"""Smoke run: every variant on one synthetic, extrapolative task.   python -m rsc.methods.smoke [--search auto|pysr|substitute]
++
++With no API key this uses the scripted fixture LLM and (without PySR) the substitute search. The numbers it prints
++verify WIRING ONLY. They are not results and must never be compared with the paper.
++"""
++from __future__ import annotations
++import argparse
++import numpy as np
++
++from .common import Task, r2, safe_predict
++from .env import ApiEnv
++from .llm import FixtureLLM
++from .stack import build_stack
++from .variants import REGISTRY, make
++
++
++def synthetic_task(seed: int = 42, n: int = 120):
++    rng = np.random.default_rng(seed)
++    f = lambda X: 2.0 * X[:, 0] + 0.5 * X[:, 1] ** 2
++    Xtr = rng.uniform(1, 5, (n, 2)); Xfar = rng.uniform(5, 9, (40, 2))
++    task = Task(Xtr, f(Xtr) + rng.normal(0, 0.05, n), ["a", "b"], "linear in a plus half of b squared",
++                domain="synthetic", seed=seed, case_id="synthetic", X_test_features=Xfar)
++    return task, Xfar, f(Xfar)
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--search", default="auto", choices=["auto", "pysr", "substitute"])
++    ap.add_argument("--live", action="store_true", help="use the LLM from config/api_env.yml instead of fixtures")
++    a = ap.parse_args()
++    env = ApiEnv.load()
++    llm = None if a.live else FixtureLLM({"default": [{"equation": "2*a + 0.4*b**2", "confidence": 0.7, "reasoning": "fixture"}]})
++    stack = build_stack(env, search=a.search, llm=llm)
++    task, Xf, yf = synthetic_task()
++    print(f"llm={stack.llm.backend} search={stack.search.engine} nn={stack.provenance()['nn_backend']}  (WIRING CHECK, not results)")
++    print(f"{'variant':12s} {'decision':24s} {'train_r2':>9s} {'far_r2':>9s} {'llm':>4s} {'srch':>4s}")
++    for vid in REGISTRY:
++        try:
++            r = make(vid).run(task, stack)
++            print(f"{vid:12s} {r.decision:24s} {r.train_r2:9.4f} {r2(yf, safe_predict(r, Xf)):9.4f} {r.api_calls:4d} {r.search_calls:4d}")
++        except Exception as e:
++            print(f"{vid:12s} ERROR {type(e).__name__}: {e}")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/rsc/methods/stack.py b/rsc/methods/stack.py
+new file mode 100644
+index 0000000..8f1f88b
+--- /dev/null
++++ b/rsc/methods/stack.py
+@@ -0,0 +1,58 @@
++"""Stack = the three imported components (llm / nn / pysr) + optional retriever, built from config.
++
++    stack = build_stack()                       # development: auto mode, substitute search if no PySR
++    stack = build_stack(strict=True)            # anchor / paper runs: live LLM, real PySR, torch NN or refuse
++"""
++from __future__ import annotations
++import os
++from dataclasses import dataclass, field
++
++from .env import ApiEnv, EnvError
++from .llm import get_client
++from .nn import NNBaseline
++from .search import PySRSearch, SubstituteSearch
++from . import pysr as pysr_mod
++
++
++@dataclass
++class Stack:
++    llm: object
++    search: object
++    env: ApiEnv
++    retriever: object | None = None
++
++    def new_nn(self, task, hidden=64, epochs: int = 400) -> NNBaseline:
++        return NNBaseline(task.description, epochs=epochs, hidden=hidden, run_seed=task.seed)
++
++    def provenance(self) -> dict:
++        """Store this next to every result row so a number can always be traced to what produced it."""
++        try:
++            import torch  # noqa: F401
++            nn_backend = "torch"
++        except ImportError:
++            nn_backend = "sklearn"
++        return {"llm": self.llm.meta(), "search_engine": self.search.engine, "nn_backend": nn_backend,
++                "rag": self.retriever is not None, "api_env": self.env.public_dict()}
++
++
++def build_stack(env: ApiEnv | None = None, search: str = "auto", retriever=None, llm=None,
++                strict: bool = False, pysr_populations: int | None = None, pysr_generations: int | None = None,
++                pysr_timeout_s: int | None = None) -> Stack:
++    env = env or ApiEnv.load()
++    if strict and env.mode != "live":
++        raise EnvError("strict stack requires api_env.yml mode: live")
++    client = llm if llm is not None else get_client(env)
++    if strict and getattr(client, "backend", "") != "live":
++        raise EnvError(f"strict stack requires the live LLM, got backend={getattr(client, 'backend', '?')}")
++    if pysr_populations is not None:
++        os.environ["PYSR_POPULATIONS"] = str(pysr_populations)
++    if pysr_generations is not None:
++        os.environ["PYSR_GENERATIONS"] = str(pysr_generations)
++    use_pysr = search == "pysr" or (search == "auto" and pysr_mod.available())
++    if strict and not pysr_mod.available():
++        raise EnvError("strict stack requires PySR (+ Julia)")
++    engine = PySRSearch(niterations=pysr_generations, timeout_s=pysr_timeout_s) if use_pysr else SubstituteSearch()
++    stack = Stack(llm=client, search=engine, env=env, retriever=retriever)
++    if strict and stack.provenance()["nn_backend"] != "torch":
++        raise EnvError("strict stack requires torch: the paper's NN numbers come from the torch path")
++    return stack
+diff --git a/rsc/methods/variants/__init__.py b/rsc/methods/variants/__init__.py
+new file mode 100644
+index 0000000..51cea4a
+--- /dev/null
++++ b/rsc/methods/variants/__init__.py
+@@ -0,0 +1,27 @@
++"""Registry keyed by the FROZEN variant ids of config/variants.yml (B_LLM, B_NN, B_PYSR, V1..V7).
++make("V4", mode="seed") builds a variant with overrides; "V4_seed" etc. are shorthands for the other V4 modes."""
++from __future__ import annotations
++
++from .baselines import PureLLM, NeuralNet, PurePySR
++from .gates import V1EnhancedHybridDeFi, V2HybridAllDomains, V3Ensemble
++from .search_variants import V4SymbolicWithLLM, V5RetryDiscovery, V7LLMSeededSearch
++from .validation_selected import V6ValidationSelected
++from .base import Variant
++
++REGISTRY = {
++    "B_LLM": (PureLLM, {}), "B_NN": (NeuralNet, {}), "B_PYSR": (PurePySR, {}),
++    "V1": (V1EnhancedHybridDeFi, {}), "V2": (V2HybridAllDomains, {}), "V3": (V3Ensemble, {}),
++    "V4": (V4SymbolicWithLLM, {"mode": "hybrid"}),
++    "V4_seed": (V4SymbolicWithLLM, {"mode": "seed"}), "V4_fallback": (V4SymbolicWithLLM, {"mode": "fallback"}),
++    "V5": (V5RetryDiscovery, {}), "V6": (V6ValidationSelected, {}), "V7": (V7LLMSeededSearch, {}),
++}
++
++
++def make(variant_id: str, **overrides) -> Variant:
++    cls, defaults = REGISTRY[variant_id]
++    v = cls(**{**defaults, **overrides})
++    v.id = variant_id.split("_")[0] if variant_id.startswith("V4_") else variant_id
++    return v
++
++
++__all__ = ["REGISTRY", "make", "Variant"]
+diff --git a/rsc/methods/variants/base.py b/rsc/methods/variants/base.py
+new file mode 100644
+index 0000000..62f7a58
+--- /dev/null
++++ b/rsc/methods/variants/base.py
+@@ -0,0 +1,39 @@
++from __future__ import annotations
++import time
++from typing import ClassVar
++
++import numpy as np
++
++from ..common import FitResult, Task
++
++
++class Variant:
++    """One interface for every method: fit(task, stack) -> FitResult.
++    `fit` never receives the test labels. It must not raise on a bad LLM answer (that is a normal outcome,
++    recorded in the result); it may raise on configuration errors (missing PySR guesses, budget, strict temperature)."""
++    id: ClassVar[str] = "?"
++    kind: ClassVar[str] = "hybrid"
++    name: ClassVar[str] = "?"
++
++    def __init__(self, **params):
++        self.params = params
++
++    def p(self, key, default):
++        return self.params.get(key, default)
++
++    def fit(self, task: Task, stack) -> FitResult:        # pragma: no cover - interface
++        raise NotImplementedError
++
++    def run(self, task: Task, stack) -> FitResult:
++        """fit() plus the accounting every result row needs (API calls and wall time of THIS fit)."""
++        c0 = stack.llm.api_calls
++        t0 = time.time()
++        res = self.fit(task, stack)
++        res.api_calls = stack.llm.api_calls - c0
++        res.info.setdefault("seconds", round(time.time() - t0, 3))
++        res.info.setdefault("variant_params", dict(self.params))
++        return res
++
++
++def nan_predict(n):
++    return np.full(n, np.nan)
+diff --git a/rsc/methods/variants/baselines.py b/rsc/methods/variants/baselines.py
+new file mode 100644
+index 0000000..267f3e7
+--- /dev/null
++++ b/rsc/methods/variants/baselines.py
+@@ -0,0 +1,39 @@
++from __future__ import annotations
++import numpy as np
++
++from ..common import FitResult, Task, r2, try_predict
++from ..hypotheses import propose, best_usable
++from .base import Variant, nan_predict
++
++
++class PureLLM(Variant):
++    id, kind, name = "B_LLM", "baseline", "Pure LLM"
++
++    def fit(self, task: Task, stack) -> FitResult:
++        h = best_usable(propose(stack, task, n=self.p("n_candidates", 1)))
++        if h is None:
++            return FitResult(self.id, "llm_unusable", lambda X: nan_predict(len(X)), float("-inf"),
++                             info={"llm_failed": True})
++        eq = h.equation
++
++        def predict(X):
++            p = try_predict(eq, X, task.names)
++            return p if p is not None else nan_predict(len(X))
++        return FitResult(self.id, "llm", predict, h.r2, equation=eq)
++
++
++class NeuralNet(Variant):
++    id, kind, name = "B_NN", "baseline", "Neural network"
++
++    def fit(self, task: Task, stack) -> FitResult:
++        nn = stack.new_nn(task).fit(task.X, task.y)
++        return FitResult(self.id, "nn", nn.predict, r2(task.y, nn.predict(task.X)),
++                         info={"nn_backend": nn.backend, "nn_seed": nn.seed})
++
++
++class PurePySR(Variant):
++    id, kind, name = "B_PYSR", "baseline", "Pure symbolic search (V4 mode=none)"
++
++    def fit(self, task: Task, stack) -> FitResult:
++        r = stack.search.run(task.X, task.y, task.names, seed=task.seed, unary=self.p("unary", ("sq", "sqrt", "log", "inv", "sin", "cos")))
++        return FitResult(self.id, "search", r.predict, r.r2, equation=r.expression, engine=r.engine, search_calls=1)
+diff --git a/rsc/methods/variants/gates.py b/rsc/methods/variants/gates.py
+new file mode 100644
+index 0000000..c8e11c4
+--- /dev/null
++++ b/rsc/methods/variants/gates.py
+@@ -0,0 +1,114 @@
++"""V1, V2, V3: gates that choose between / blend an LLM formula and an NN using TRAINING-set R2.
++Provenance: re-implementations of the documented logic (not diffed against the real classes)."""
++from __future__ import annotations
++import numpy as np
++
++from ..common import FitResult, Task, r2, try_predict, affine_refit, inverse_std_weights
++from ..hypotheses import propose, best_usable
++from .base import Variant, nan_predict
++
++
++class V1EnhancedHybridDeFi(Variant):
++    """EnhancedHybridSystemDeFi: affine-refit the LLM formula; gate on the refit's training R2.
++         fitted_r2 >= fitted_threshold                  -> fitted LLM
++         fitted_r2 > nn_floor and nn_r2 > nn_floor      -> inverse-residual-std ensemble of fitted LLM and NN
++         otherwise                                      -> NN"""
++    id, name = "V1", "Enhanced Hybrid DeFi"
++
++    def fit(self, task: Task, stack) -> FitResult:
++        thr, floor = self.p("fitted_threshold", 0.97), self.p("nn_floor", 0.0)
++        h = best_usable(propose(stack, task, n=1))
++        nn = stack.new_nn(task).fit(task.X, task.y)
++        nn_tr = nn.predict(task.X); nn_r2 = r2(task.y, nn_tr)
++        if h is not None:
++            fitted_tr, a, b = affine_refit(h.pred, task.y)
++            fitted_r2 = r2(task.y, fitted_tr)
++        else:
++            fitted_tr, a, b, fitted_r2 = None, 1.0, 0.0, float("-inf")
++        eq = h.equation if h else None
++
++        if fitted_r2 >= thr:
++            decision, w_f = "fitted_llm", 1.0
++        elif fitted_r2 > floor and nn_r2 > floor:
++            decision = "ensemble"
++            w_f, _ = inverse_std_weights(task.y - fitted_tr, task.y - nn_tr)
++        else:
++            decision, w_f = "nn", 0.0
++
++        def predict(X):
++            if decision == "nn":
++                return nn.predict(X)
++            fit = a * try_predict(eq, X, task.names) + b
++            return fit if decision == "fitted_llm" else w_f * fit + (1 - w_f) * nn.predict(X)
++
++        train_r2 = {"fitted_llm": fitted_r2, "nn": nn_r2}.get(decision)
++        if train_r2 is None:
++            train_r2 = r2(task.y, w_f * fitted_tr + (1 - w_f) * nn_tr)
++        return FitResult(self.id, decision, predict, train_r2, equation=eq,
++                         info={"llm_r2": h.r2 if h else float("-inf"), "fitted_r2": fitted_r2, "nn_r2": nn_r2,
++                               "refit_a": a, "refit_b": b, "w_fitted": w_f, "selects_on": "training_r2"})
++
++
++class V2HybridAllDomains(Variant):
++    """HybridSystemAllDomains: LLM unless the NN beats it by more than tie_eps on TRAINING R2 (ties favour the formula)."""
++    id, name = "V2", "Hybrid All-Domains"
++
++    def fit(self, task: Task, stack) -> FitResult:
++        eps, nn_fail_r2 = self.p("tie_eps", 1e-3), self.p("nn_fallback_r2", 0.90)
++        force = self.p("force_llm", False)
++        h = best_usable(propose(stack, task, n=1))
++        nn = stack.new_nn(task).fit(task.X, task.y)
++        nn_r2 = r2(task.y, nn.predict(task.X))
++        llm_r2 = h.r2 if h else float("-inf")
++        eq = h.equation if h else None
++        # `h is not None` matters: -inf >= -inf - eps is True, which would pick a formula that does not exist.
++        if force:
++            decision, reason = "llm", "forced"
++        elif h is not None and llm_r2 >= nn_r2 - eps:
++            decision, reason = "llm", "symbolic_preferred (tie favours symbolic)"
++        else:
++            decision = "nn"
++            reason = "NN fallback (LLM failed)" if llm_r2 <= nn_fail_r2 else "NN better"
++
++        def predict(X):
++            if decision == "nn":
++                return nn.predict(X)
++            p = try_predict(eq, X, task.names)
++            return p if p is not None else nan_predict(len(X))
++
++        return FitResult(self.id, decision, predict, llm_r2 if decision == "llm" else nn_r2, equation=eq,
++                         info={"reason": reason, "llm_r2": llm_r2, "nn_r2": nn_r2,
++                               # the source's label fires whenever NN wins and LLM<=0.90; this is the true flag
++                               "llm_failed": h is None, "selects_on": "training_r2"})
++
++
++class V3Ensemble(Variant):
++    """ensemble_llm_nn: inverse-residual-std blend of the RAW LLM formula and the NN (no gate, no refit).
++    Fallback to max(LLM, NN) by training R2 if the weighting raises (kept for fidelity; practically unreachable)."""
++    id, name = "V3", "Ensemble LLM+NN"
++
++    def fit(self, task: Task, stack) -> FitResult:
++        h = best_usable(propose(stack, task, n=1))
++        nn = stack.new_nn(task).fit(task.X, task.y)
++        nn_tr = nn.predict(task.X); nn_r2 = r2(task.y, nn_tr)
++        if h is None:                                   # no formula to blend: the original would have blended zeros
++            return FitResult(self.id, "nn_llm_unavailable", nn.predict, nn_r2,
++                             info={"llm_failed": True, "nn_r2": nn_r2, "selects_on": "training_r2"})
++        eq = h.equation
++        try:
++            if self.p("force_fallback", False):
++                raise RuntimeError("forced fallback")
++            w_l, w_n = inverse_std_weights(task.y - h.pred, task.y - nn_tr)
++            mode = "weighted_blend"
++        except Exception:
++            mode = "fallback_max_llm" if h.r2 >= nn_r2 else "fallback_max_nn"
++            w_l, w_n = (1.0, 0.0) if mode == "fallback_max_llm" else (0.0, 1.0)
++
++        def predict(X):
++            p = try_predict(eq, X, task.names)
++            if w_l > 0 and p is None:
++                return nan_predict(len(X))
++            return (w_l * p if w_l > 0 else 0.0) + (w_n * nn.predict(X) if w_n > 0 else 0.0)
++
++        return FitResult(self.id, mode, predict, r2(task.y, w_l * h.pred + w_n * nn_tr), equation=eq,
++                         info={"w_llm": w_l, "w_nn": w_n, "llm_r2": h.r2, "nn_r2": nn_r2, "selects_on": "training_r2"})
+diff --git a/rsc/methods/variants/search_variants.py b/rsc/methods/variants/search_variants.py
+new file mode 100644
+index 0000000..2dd1c50
+--- /dev/null
++++ b/rsc/methods/variants/search_variants.py
+@@ -0,0 +1,202 @@
++"""V4 (LLM prior + search, 4 modes), V5 (retry loop around one search engine), V7 (LLM-seeded search vs unseeded).
++All three run through stack.search: real PySR when installed, the clearly-labelled substitute otherwise."""
++from __future__ import annotations
++import re
++import numpy as np
++
++from ..common import FitResult, Task, r2, try_predict, equation_ok
++from ..hypotheses import propose, best_usable
++from .base import Variant, nan_predict
++
++
++def _llm_predict(eq, names):
++    def f(X):
++        p = try_predict(eq, X, names)
++        return p if p is not None else nan_predict(len(X))
++    return f
++
++
++def _require_guesses(stack, guesses):
++    if guesses and not stack.search.supports_guesses:
++        raise RuntimeError("search engine cannot take `guesses`: refusing to run a 'seeded' method unseeded (audit A-020)")
++
++
++# ------------------------------------------------------------------ V4
++class V4SymbolicWithLLM(Variant):
++    """SymbolicEngineWithLLM. mode: none | seed | hybrid | fallback.
++       hybrid : LLM first. R2_llm > hybrid_llm_only -> LLM only (search skipped);
++                R2_llm >= hybrid_use_prior -> search seeded with the formula, keep the better; else plain search, keep the better.
++       fallback: search first; R2 > fallback_search_ok -> done; else ask the LLM and keep the better.
++    Deviation from the standalone script: seeds are the LLM equation itself (a guess), not the library terms that
++    happen to occur as substrings of it (the substring test matched 'x' inside 'exp')."""
++    id, name = "V4", "LLM-prior / search family"
++
++    def fit(self, task: Task, stack) -> FitResult:
++        mode = self.p("mode", "hybrid")
++        t_only, t_prior, t_ok = self.p("hybrid_llm_only", 0.95), self.p("hybrid_use_prior", 0.5), self.p("fallback_search_ok", 0.90)
++        unary = self.p("unary", ("sq", "sqrt", "log", "inv", "sin", "cos"))
++        calls = 0
++
++        def search(guesses=None):
++            nonlocal calls
++            _require_guesses(stack, guesses)
++            calls += 1
++            return stack.search.run(task.X, task.y, task.names, seed=task.seed, guesses=guesses, unary=unary)
++
++        def from_search(r, tag):
++            return FitResult(self.id, tag, r.predict, r.r2, equation=r.expression, engine=r.engine,
++                             info={"mode": mode, "selects_on": "training_r2", **r.info})
++
++        def from_llm(h, tag):
++            return FitResult(self.id, tag, _llm_predict(h.equation, task.names), h.r2, equation=h.equation,
++                             info={"mode": mode, "selects_on": "training_r2"})
++
++        if mode == "none":
++            res = from_search(search(), "none")
++        elif mode == "seed":
++            h = best_usable(propose(stack, task, 1))
++            res = from_search(search([h.equation] if h else None), "seed" if h else "seed_llm_failed")
++        elif mode == "hybrid":
++            h = best_usable(propose(stack, task, 1))
++            if h is None:
++                res = from_search(search(), "hybrid_llm_failed")
++            elif h.r2 > t_only:
++                res = from_llm(h, "hybrid_llm_only")
++            else:
++                r = search([h.equation] if h.r2 >= t_prior else None)
++                res = from_search(r, "hybrid_search_better") if r.r2 > h.r2 else from_llm(h, "hybrid_llm_better")
++        elif mode == "fallback":
++            r = search()
++            if r.r2 > t_ok:
++                res = from_search(r, "fallback_search_only")
++            else:
++                h = best_usable(propose(stack, task, 1))
++                if h is None:
++                    res = from_search(r, "fallback_both_failed")
++                elif h.r2 > r.r2:
++                    res = from_llm(h, "fallback_llm_better")
++                else:
++                    res = from_search(r, "fallback_search_better")
++        else:
++            raise ValueError(f"unknown V4 mode {mode!r}")
++        res.search_calls = calls
++        return res
++
++
++# ------------------------------------------------------------------ V5
++def check_expression_quality(expression: str, r2_value: float, complexity_threshold: int = 20) -> dict:
++    """As in the real system: 'complexity' is len(expression) -- the printed string, not a node count."""
++    complexity = len(expression)
++    return {"is_overfit": complexity > complexity_threshold and round(r2_value, 6) < 0.999, "complexity": complexity}
++
++
++def detect_rational_pattern(X: np.ndarray, y: np.ndarray) -> bool:
++    """Lineweaver-Burk linearisation (1/y vs 1/x, R2>0.85) or a saturating shape. Loose heuristics: it fires on
++    most smooth monotonic positive data (confirmed in the standalone port)."""
++    if X.shape[1] < 1 or np.any(y <= 0):
++        return False
++    try:
++        inv_y = 1.0 / y
++        for i in range(X.shape[1]):
++            xi = X[:, i]
++            if np.any(xi <= 0):
++                continue
++            inv_x = 1.0 / xi
++            if r2(inv_y, np.polyval(np.polyfit(inv_x, inv_y, 1), inv_x)) > 0.85:
++                return True
++        for i in range(X.shape[1]):
++            ys = y[np.argsort(X[:, i])]
++            if ys[-1] > ys[0]:
++                d = np.diff(ys)
++                if np.all(d >= -1e-6) and d[-1] < d[0] * 0.3:
++                    return True
++    except Exception:
++        return False
++    return False
++
++
++def physics_fallback(X, y, names):
++    """SUBSTITUTE for the real 2117-line GP PhysicsAwareRegressor: best of linear / quadratic / log-log power law / log-linear exponential."""
++    cands = []
++    A = np.column_stack([np.ones(len(y)), X]); c, *_ = np.linalg.lstsq(A, y, rcond=None)
++    cands.append(("linear", lambda Z, c=c: np.column_stack([np.ones(len(Z)), Z]) @ c))
++    Q = lambda Z: np.column_stack([np.ones(len(Z)), Z, Z ** 2])
++    c2, *_ = np.linalg.lstsq(Q(X), y, rcond=None)
++    cands.append(("quadratic", lambda Z, c=c2: Q(Z) @ c))
++    if np.all(X > 0) and np.all(y > 0):
++        L = lambda Z: np.column_stack([np.ones(len(Z)), np.log(Z)])
++        c3, *_ = np.linalg.lstsq(L(X), np.log(y), rcond=None)
++        cands.append(("power_law", lambda Z, c=c3: np.exp(L(Z) @ c)))
++    if np.all(y > 0):
++        c4, *_ = np.linalg.lstsq(A, np.log(y), rcond=None)
++        cands.append(("exponential", lambda Z, c=c4: np.exp(np.column_stack([np.ones(len(Z)), Z]) @ c)))
++    scored = [(r2(y, f(X)), n, f) for n, f in cands]
++    s, n, f = max(scored, key=lambda t: t[0])
++    return s, n, f
++
++
++class V5RetryDiscovery(Variant):
++    """HybridDiscoverySystem (hybrid_system_v50_2.py): retry ONE search engine up to max_retries times.
++    No LLM call in this extraction (confirm against the real class). Search budget is up to max_retries x V4's.
++    seed_mode='fixed42' (DEFAULT, mirrors the documented code and DESIGN.md s2): attempt seed = 42 + attempt, so every
++        experiment seed explores the same 5 seeds and a 5-seed sweep of V5 is NOT 5 independent runs.
++    seed_mode='task': attempt seed = task.seed + attempt. A deviation from the documented code: only use it as a
++        declared, logged decision (it changes the comparability key)."""
++    id, name = "V5", "Retry loop + optional physics fallback"
++
++    def fit(self, task: Task, stack) -> FitResult:
++        max_retries = self.p("max_retries", 5)
++        early = self.p("early_stop_r2", 0.9999 if self.p("transcendental", False) else 0.95)
++        success_r2, cplx = self.p("success_r2", 0.97), self.p("complexity_penalty_threshold", 20)
++        fb_on, fb_thr = self.p("enable_physics_fallback", False), self.p("physics_fallback_threshold", 0.85)
++        base = task.seed if self.p("seed_mode", "fixed42") == "task" else 42
++        unary, inv_injected = ["sq", "sqrt", "log"], False
++        best, best_r2, attempts, stop = None, -np.inf, 0, "retries_exhausted"
++
++        for attempt in range(max_retries):
++            r = stack.search.run(task.X, task.y, task.names, seed=base + attempt, unary=tuple(unary))
++            attempts += 1
++            q = check_expression_quality(r.expression, r.r2, cplx)
++            if r.r2 > best_r2:
++                best, best_r2 = r, r.r2
++            if attempt == 0 and r.r2 < 0.1 and not inv_injected and detect_rational_pattern(task.X, task.y):
++                unary.append("inv"); inv_injected = True
++            if r.r2 >= early and not q["is_overfit"]:
++                stop = "early_stop"
++                break
++        engine = "symbolic"
++        predict, expr, final_r2 = best.predict, best.expression, best_r2
++        if stop != "early_stop" and fb_on and best_r2 < fb_thr:
++            s, kind, f = physics_fallback(task.X, task.y, task.names)
++            if s > best_r2:
++                predict, expr, final_r2, engine, stop = f, f"physics_substitute:{kind}", s, "physics_aware", "physics_fallback"
++        return FitResult(self.id, stop, predict, final_r2, equation=expr, engine=best.engine, search_calls=attempts,
++                         info={"attempts": attempts, "success": final_r2 >= success_r2, "discovery_engine": engine,
++                               "inv_injected": inv_injected, "seed_mode": self.p("seed_mode", "fixed42"),
++                               "selects_on": "training_r2"})
++
++
++# ------------------------------------------------------------------ V7
++class V7LLMSeededSearch(Variant):
++    """get_llm_prior -> search `guesses`; the unseeded run P on the same case is recorded for the H-vs-P comparison.
++    Fails fast if the engine cannot seed. Costs two searches + one LLM call per case."""
++    id, name = "V7", "LLM-prior search seeding"
++
++    def fit(self, task: Task, stack) -> FitResult:
++        if not stack.search.supports_guesses:
++            raise RuntimeError("[FIX-LLM-WARMSTART-CTOR] engine has no guess-seeding: refusing to run H unseeded")
++        unary = self.p("unary", ("sq", "sqrt", "log", "inv", "sin", "cos"))
++        guesses, requested, llm_error = [], 0, None
++        try:
++            hyps = propose(stack, task, self.p("n_candidates", 5))
++            requested = len(hyps)
++            guesses = [h.equation for h in hyps if equation_ok(h.equation, task.names)]
++        except Exception as e:                       # real code: any LLM failure -> cold run for this case
++            llm_error = f"{type(e).__name__}: {e}"
++        h = stack.search.run(task.X, task.y, task.names, seed=task.seed, guesses=guesses or None, unary=unary)
++        p = stack.search.run(task.X, task.y, task.names, seed=task.seed, guesses=None, unary=unary)
++        return FitResult(self.id, "seeded" if guesses else "seeded_but_no_valid_guess", h.predict, h.r2,
++                         equation=h.expression, engine=h.engine, search_calls=2,
++                         info={"candidates_requested": requested, "candidates_seeded": len(guesses),
++                               "unseeded_r2": p.r2, "unseeded_expression": p.expression,
++                               "H_beat_P": h.r2 > p.r2, "llm_error": llm_error, "selects_on": "none (H always returned)"})
+diff --git a/rsc/methods/variants/validation_selected.py b/rsc/methods/variants/validation_selected.py
+new file mode 100644
+index 0000000..189de9c
+--- /dev/null
++++ b/rsc/methods/variants/validation_selected.py
+@@ -0,0 +1,165 @@
++"""V6 -- validation-selected residual hybrid (ported from _select_v4_candidate in hypatiax_defi_benchmark_v4.py).
++The only variant that selects on HELD-OUT data (the high end of the training range), not on training R2.
++NN candidates now use the shared NNBaseline (torch when installed), where the standalone script used sklearn.
++Open decision: it also reads X_test_features (features only) to detect extrapolation, information the other
++variants never see. Set use_test_features=False to remove that advantage; the choice is recorded in the result."""
++from __future__ import annotations
++import numpy as np
++
++from ..common import FitResult, Task, r2, try_predict
++from ..hypotheses import propose, best_usable
++from .base import Variant, nan_predict
++
++ARCHITECTURES = ((64, 32), (128, 64, 32))
++BLEND_GRID = np.linspace(0.0, 1.0, 21)
++MIN_VAL, VAL_FRAC = 5, 0.2
++PRIORITY = {"llm": 0, "residual": 1, "blend": 2, "linear_fallback": 3, "linear_fallback_local": 4, "nn": 5}
++
++
++def extrapolates(X_train, X_test) -> bool:
++    a, b = np.atleast_2d(X_train), np.atleast_2d(X_test)
++    return bool(np.any(b.min(0) < a.min(0)) or np.any(b.max(0) > a.max(0)))
++
++
++def split_internal_validation(X, y, split_var_idx: int = 0, val_frac: float = VAL_FRAC):
++    n = len(X)
++    if n < 2 * MIN_VAL:
++        return X, y, None, None
++    order = np.argsort(X[:, split_var_idx])
++    n_val = min(max(MIN_VAL, int(round(n * val_frac))), n - MIN_VAL)
++    inner, val = order[:-n_val], order[-n_val:]
++    return X[inner], y[inner], X[val], y[val]
++
++
++def _affine(Xtr, ytr, Xte, lam):
++    A1, B1 = np.column_stack([np.ones(len(Xtr)), Xtr]), np.column_stack([np.ones(len(Xte)), Xte])
++    coef = np.linalg.solve(A1.T @ A1 + lam * np.eye(A1.shape[1]), A1.T @ ytr)
++    return B1 @ coef, A1 @ coef
++
++
++def fit_linear_fallback(Xtr, ytr, Xte, lam: float = 1e-2, clamp: float = 3.0):
++    Xtr, Xte, ytr = np.atleast_2d(Xtr).astype(float), np.atleast_2d(Xte).astype(float), np.asarray(ytr, float)
++    best, best_res = None, 0.0
++    p_te, p_tr = _affine(Xtr, ytr, Xte, lam)
++    best, best_res = p_te, float(np.mean((p_tr - ytr) ** 2))
++    if np.all(Xtr > 0) and np.all(Xte > 0) and np.all(ytr > 0):
++        l_te, l_tr = _affine(np.log(Xtr), np.log(ytr), np.log(Xte), lam)
++        res = float(np.mean((np.exp(l_tr) - ytr) ** 2))
++        if np.all(np.isfinite(l_te)) and res < best_res:
++            best = np.exp(l_te)
++    if not np.all(np.isfinite(best)):
++        best = np.nan_to_num(best, nan=float(np.median(ytr)), posinf=float(ytr.max()), neginf=float(ytr.min()))
++    lo, hi = ytr.min(), ytr.max()
++    span = hi - lo if hi > lo else max(abs(hi), 1.0)
++    return np.clip(best, lo - clamp * span, hi + clamp * span)
++
++
++def fit_linear_fallback_local(Xtr, ytr, Xte, k: int = 8, buffer_mult: float = 6.0):
++    base = fit_linear_fallback(Xtr, ytr, Xte)
++    Xtr, Xte, ytr = np.atleast_2d(Xtr).astype(float), np.atleast_2d(Xte).astype(float), np.asarray(ytr, float)
++    mu, sd = Xtr.mean(0), np.where(Xtr.std(0) == 0, 1.0, Xtr.std(0))
++    A, B = (Xtr - mu) / sd, (Xte - mu) / sd
++    out, k = base.copy(), min(k, len(Xtr))
++    for i in range(len(B)):
++        ly = ytr[np.argsort(np.sum((A - B[i]) ** 2, axis=1))[:k]]
++        lo, hi = float(ly.min()), float(ly.max())
++        span = hi - lo if hi > lo else max(abs(hi), 1.0)
++        out[i] = float(np.clip(base[i], lo - buffer_mult * span, hi + buffer_mult * span))
++    return out
++
++
++def _rank_fallbacks(Xi, yi, Xv, yv) -> dict:
++    out = {}
++    for name, fn in (("linear_fallback", fit_linear_fallback), ("linear_fallback_local", fit_linear_fallback_local)):
++        try:
++            out[name] = r2(yv, fn(Xi, yi, Xv))
++        except Exception:
++            pass
++    return out
++
++
++def select_candidate(task: Task, stack, llm_fn, extrapolative: bool) -> dict:
++    Xi, yi, Xv, yv = split_internal_validation(task.X, task.y)
++    if Xv is None:
++        sel = "llm" if llm_fn else ("linear_fallback" if extrapolative else "nn")
++        return {"selected": sel, "hidden": None, "alpha": 1.0, "validation_r2": {}, "validation_n": 0}
++    llm_i = llm_fn(Xi) if llm_fn else None
++    llm_v = llm_fn(Xv) if llm_fn else None
++    llm_ok = llm_i is not None and llm_v is not None and np.all(np.isfinite(llm_i)) and np.all(np.isfinite(llm_v))
++    cands: dict = {}
++    if llm_ok:
++        cands["llm"] = {"r2": r2(yv, llm_v), "hidden": None, "alpha": 1.0}
++    for hidden in ARCHITECTURES:
++        try:
++            nn_v = stack.new_nn(task, hidden=hidden).fit(Xi, yi).predict(Xv)
++            cands[f"nn:{hidden}"] = {"r2": r2(yv, nn_v), "hidden": hidden, "alpha": 0.0}
++            if llm_ok:
++                res_v = stack.new_nn(task, hidden=hidden).fit(Xi, yi - llm_i).predict(Xv)
++                cands[f"residual:{hidden}"] = {"r2": r2(yv, llm_v + res_v), "hidden": hidden, "alpha": 1.0}
++                best_a, best_s = 0.0, -np.inf
++                for a in BLEND_GRID:                       # strict '>' as in the source: first best alpha in grid order
++                    s = r2(yv, a * llm_v + (1 - a) * nn_v)
++                    if s > best_s:
++                        best_s, best_a = s, float(a)
++                cands[f"blend:{hidden}"] = {"r2": best_s, "hidden": hidden, "alpha": best_a}
++        except Exception:
++            continue
++    if not cands:
++        if extrapolative:
++            fb = _rank_fallbacks(Xi, yi, Xv, yv) or {"linear_fallback": float("nan")}
++            return {"selected": max(fb, key=lambda k: (fb[k], k == "linear_fallback")), "hidden": None, "alpha": 1.0,
++                    "validation_r2": fb, "validation_n": len(yv)}
++        return {"selected": "nn", "hidden": None, "alpha": 0.0, "validation_r2": {}, "validation_n": len(yv)}
++    pool = cands
++    if extrapolative:
++        anchored = {k: v for k, v in cands.items() if not k.startswith("nn:")}
++        if anchored:
++            pool = anchored
++        else:
++            fb = _rank_fallbacks(Xi, yi, Xv, yv) or {"linear_fallback": float("nan")}
++            for n, s in fb.items():
++                cands[n] = {"r2": s, "hidden": None, "alpha": 1.0}
++            pool = {n: cands[n] for n in fb}
++    key = max(pool, key=lambda k: (pool[k]["r2"], -PRIORITY.get(k.split(":")[0], 9)))
++    prefix = key.split(":")[0]
++    return {"selected": "residual_nn" if prefix == "residual" else prefix, "hidden": cands[key]["hidden"],
++            "alpha": float(cands[key]["alpha"]), "validation_r2": {k: v["r2"] for k, v in cands.items()},
++            "validation_n": len(yv)}
++
++
++class V6ValidationSelected(Variant):
++    id, name = "V6", "Validation-selected hybrid"
++
++    def fit(self, task: Task, stack) -> FitResult:
++        use_feats = self.p("use_test_features", True)
++        extrap = bool(use_feats and task.X_test_features is not None and extrapolates(task.X, task.X_test_features))
++        h = best_usable(propose(stack, task, 1))
++        eq = h.equation if h else None
++        llm_fn = (lambda X, e=eq: try_predict(e, X, task.names)) if h else None
++        sel = select_candidate(task, stack, llm_fn, extrap)
++        s, hidden, alpha = sel["selected"], sel["hidden"], sel["alpha"]
++        Xtr, ytr = task.X, task.y
++
++        if s == "llm":
++            predict = lambda X: llm_fn(X) if llm_fn(X) is not None else nan_predict(len(X))
++        elif s == "nn":
++            nn = stack.new_nn(task, hidden=hidden or 64).fit(Xtr, ytr)
++            predict = nn.predict
++        elif s == "residual_nn":
++            res_nn = stack.new_nn(task, hidden=hidden).fit(Xtr, ytr - llm_fn(Xtr))
++            predict = lambda X: llm_fn(X) + res_nn.predict(X)
++        elif s == "blend":
++            nn = stack.new_nn(task, hidden=hidden).fit(Xtr, ytr)
++            predict = lambda X: alpha * llm_fn(X) + (1 - alpha) * nn.predict(X)
++        elif s == "linear_fallback_local":
++            predict = lambda X: fit_linear_fallback_local(Xtr, ytr, X)
++        else:
++            predict = lambda X: fit_linear_fallback(Xtr, ytr, X)
++        try:
++            train_r2 = r2(ytr, predict(Xtr))
++        except Exception:
++            train_r2 = float("-inf")
++        return FitResult(self.id, s, predict, train_r2, equation=eq,
++                         info={**{k: v for k, v in sel.items() if k != "selected"}, "extrapolative": extrap,
++                               "used_test_features": bool(use_feats and task.X_test_features is not None),
++                               "selects_on": "internal_validation_r2"})
+-- 
+2.43.0
+

@@ -1,0 +1,16 @@
+# EXAMPLE knowledge base -- generic textbook relations only, to show the format and run the tests.
+# NOT for anchor / paper runs: a real KB must be built so that no card equals or contains any benchmark
+# ground-truth formula (retrieval.view_for_case + audit_prompt_leak enforce and verify that).
+cards:
+  - {id: kb_ideal_gas, name: Ideal gas law, domain: physics, formula: "n*R*T/V", variables: [n, R, T, V],
+     description: "pressure of an ideal gas from amount, temperature and volume", source: textbook}
+  - {id: kb_kinetic_energy, name: Kinetic energy, domain: physics, formula: "0.5*m*v**2", variables: [m, v],
+     description: "energy of a moving mass", source: textbook}
+  - {id: kb_ohm, name: Ohm's law, domain: physics, formula: "V/R", variables: [V, R],
+     description: "current through a resistor from voltage and resistance", source: textbook}
+  - {id: kb_compound, name: Compound interest, domain: finance, formula: "P*(1+r/n)**(n*t)", variables: [P, r, n, t],
+     description: "balance after compounding interest n times per year", source: textbook}
+  - {id: kb_present_value, name: Present value, domain: finance, formula: "FV/(1+r)**t", variables: [FV, r, t],
+     description: "discounted value of a future cash flow", source: textbook}
+  - {id: kb_michaelis, name: Michaelis-Menten rate, domain: biology, formula: "Vmax*S/(Km+S)", variables: [Vmax, S, Km],
+     description: "enzyme reaction rate saturating with substrate concentration", source: textbook}

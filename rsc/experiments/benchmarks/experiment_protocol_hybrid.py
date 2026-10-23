@@ -84,6 +84,11 @@ from typing import Callable, Optional
 
 import numpy as np
 
+try:
+    from rsc.methods.metrics import r2 as _canonical_r2, selection_score as _selection_score
+except ImportError:  # running from inside rsc/
+    from methods.metrics import r2 as _canonical_r2, selection_score as _selection_score
+
 # ── sys.path bootstrap ───────────────────────────────────────────────────
 # Same convention as the other experiment_protocol_*.py files: resolves
 # hypatiax.* imports whether this file is run directly or imported by
@@ -430,13 +435,9 @@ class RunRecord:
     error_message: Optional[str] = None
 
 
-def _r2(y_true, y_pred) -> float:
-    y_pred = np.asarray(y_pred, dtype=float)
-    if not np.all(np.isfinite(y_pred)):
-        return float("-inf")
-    ss_res = np.sum((y_true - y_pred) ** 2)
-    ss_tot = np.sum((y_true - y_true.mean()) ** 2)
-    return 1.0 - ss_res / ss_tot if ss_tot > 0 else (1.0 if ss_res == 0 else float("-inf"))
+def _r2(y_true, y_pred):
+    """Delegates to rsc.methods.metrics; undefined R^2 -> -inf (fail closed)."""
+    return _selection_score(_canonical_r2(y_true, y_pred))
 
 
 def _run_variant(cap: VariantCapability, desc: str, X, y, var_names: list[str],

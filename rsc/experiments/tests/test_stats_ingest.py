@@ -53,3 +53,14 @@ def test_sweep_ingest_guards(tmp_path):
     p = run(); assert "skipped_synthetic" in p.stdout                                         # real mode refuses synthetic
     write([["ablation", "V7", "c", 42, "bogus", "", 0.9, 0.9, "v5.4", 0]])
     assert run("--dryrun").returncode != 0                                                     # unknown mode is a hard error
+
+
+def test_is_catastrophic_judges_raw_value_not_fnum_output():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("ingest_results", ROOT / "scripts" / "ingest_results.py")
+    mod = importlib.util.module_from_spec(spec); sys.path.insert(0, str(ROOT / "rsc" / "db")); spec.loader.exec_module(mod)
+    f = mod.is_catastrophic
+    assert f(float("-inf")) and f(float("nan")) and f(-1.5) and f("-3")      # failures count
+    assert not f(None) and not f("junk") and not f(-1.0) and not f(0.2)       # missing/ok do not
+    assert not f(float("inf"))                                                # +inf is not a failure
+    assert mod.fnum(float("-inf")) is None                                    # why the raw check is needed
